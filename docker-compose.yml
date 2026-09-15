@@ -23,11 +23,14 @@ services:
 
     environment:
       POSTGRES_USER: tspi
-      POSTGRES_PASSWORD: ${TSPI_DB_PASSWORD:?}
+      POSTGRES_PASSWORD: ${TSPI_DB_PASSWORD:-tspi}
       POSTGRES_DB: tspi
 
     volumes:
       - tspi_pgdata:/var/lib/postgresql/data
+
+    expose:
+      - "5432"
 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tspi -d tspi"]
@@ -46,13 +49,20 @@ services:
       context: ./apps/ai-engine
 
     environment:
-      DATABASE_URL: postgresql+psycopg://tspi:${TSPI_DB_PASSWORD:?}@tspi-db:5432/tspi
+      DATABASE_URL: postgresql+psycopg://tspi:${TSPI_DB_PASSWORD:-tspi}@tspi-db:5432/tspi
 
     # ports:
     #   - "8000:8000"
 
     expose:
       - "8000"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
     depends_on:
       tspi-db:
@@ -82,9 +92,16 @@ services:
     expose:
       - "8080"
 
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8080), timeout=2).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
     depends_on:
       tspi-api:
-        condition: service_started
+        condition: service_healthy
 
     restart: unless-stopped
 

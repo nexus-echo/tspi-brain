@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     embedding_api_base: str = "https://api.openai.com/v1"
     embedding_api_key: str | None = None
     embedding_model: str = "text-embedding-3-small"
+    embedding_api_send_dimensions: bool = True  # set False for providers that don't accept the dimensions param (e.g. OpenRouter)
     ollama_embedding_model: str = "bge-m3"   # local Ollama embed model (multilingual)
 
     # LLM
@@ -32,6 +33,9 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
     groq_api_key: str | None = None
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
 
     # --- Lab/imaging extraction (LOCAL-ONLY by governance decision) ---
     # Reads uploaded reports (images, scanned PDFs) with a local Ollama VISION model, and

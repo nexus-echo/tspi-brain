@@ -18,6 +18,8 @@ class LLMProvider:
         order: list[str] = []
         if settings.llm_primary:
             order.append(settings.llm_primary)
+        if settings.openrouter_api_key and "openrouter" not in order:
+            order.append("openrouter")
         if settings.deepseek_api_key and "deepseek" not in order:
             order.append("deepseek")
         if settings.ollama_base_url and "ollama" not in order:
@@ -28,6 +30,8 @@ class LLMProvider:
 
     @staticmethod
     def _usable(provider: str) -> bool:
+        if provider == "openrouter":
+            return bool(settings.openrouter_api_key)
         if provider == "deepseek":
             return bool(settings.deepseek_api_key)
         if provider == "ollama":
@@ -39,6 +43,8 @@ class LLMProvider:
         last_err: Exception | None = None
         for provider in self.chain:
             try:
+                if provider == "openrouter":
+                    return await self._openrouter(prompt)
                 if provider == "deepseek":
                     return await self._deepseek(prompt)
                 if provider == "ollama":
@@ -48,6 +54,19 @@ class LLMProvider:
         if last_err:
             raise last_err
         raise RuntimeError("No LLM provider available.")
+
+    async def _openrouter(self, prompt: str) -> str:
+        url = f"{settings.openrouter_base_url.rstrip('/')}/chat/completions"
+        headers = {"Authorization": f"Bearer {settings.openrouter_api_key}"}
+        payload = {
+            "model": settings.openrouter_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        }
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
 
     async def _deepseek(self, prompt: str) -> str:
         url = f"{settings.deepseek_base_url.rstrip('/')}/chat/completions"

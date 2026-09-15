@@ -84,7 +84,7 @@ class EmbeddingProvider:
         url = f"{settings.embedding_api_base.rstrip('/')}/embeddings"
         headers = {"Authorization": f"Bearer {settings.embedding_api_key}"}
         payload: dict = {"model": settings.embedding_model, "input": texts}
-        if self.dim:
+        if self.dim and settings.embedding_api_send_dimensions:
             payload["dimensions"] = self.dim
         return url, payload, headers
 

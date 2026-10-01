@@ -123,5 +123,16 @@ class Settings:
     claim_first_name: str = os.getenv("TSPI_CLAIM_FIRST_NAME", "first_name")
     claim_last_name: str = os.getenv("TSPI_CLAIM_LAST_NAME", "last_name")
 
+    # --- First-party apps that log users in through the same AuthKit (e.g. TSPI Digital chat) ---
+    # Their access tokens carry aud=<WorkOS environment client ID> instead of this server's
+    # resource URL. Accepted ONLY when the token's client_id is in TSPI_ALLOWED_CLIENT_IDS.
+    # Both are comma-separated; leave empty to accept only resource-bound tokens (default).
+    extra_audiences: tuple[str, ...] = tuple(
+        a.strip() for a in os.getenv("TSPI_EXTRA_AUDIENCES", "").split(",") if a.strip()
+    )
+    allowed_client_ids: tuple[str, ...] = tuple(
+        c.strip() for c in os.getenv("TSPI_ALLOWED_CLIENT_IDS", "").split(",") if c.strip()
+    )
+
 
 settings = Settings()

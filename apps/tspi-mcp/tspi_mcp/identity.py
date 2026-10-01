@@ -22,16 +22,72 @@ def build_auth():
     if mode == "workos":
         if not (settings.workos_authkit_domain and settings.mcp_base_url):
             raise RuntimeError("TSPI_MCP_AUTH=workos requires TSPI_WORKOS_AUTHKIT_DOMAIN and TSPI_MCP_BASE_URL.")
-        from fastmcp.server.auth.providers.workos import AuthKitProvider
-
-        return AuthKitProvider(
+        kwargs = dict(
             authkit_domain=settings.workos_authkit_domain,
             base_url=settings.mcp_base_url,
             resource_base_url=settings.mcp_base_url,
             resource_name="TSPI AI Brain",
         )
+        if not settings.extra_audiences:
+            from fastmcp.server.auth.providers.workos import AuthKitProvider
+
+            return AuthKitProvider(**kwargs)
+        if not settings.allowed_client_ids:
+            raise RuntimeError(
+                "TSPI_EXTRA_AUDIENCES requires TSPI_ALLOWED_CLIENT_IDS (the WorkOS client IDs of "
+                "the first-party apps, e.g. TSPI Digital chat). Refusing to accept any-app tokens."
+            )
+        return build_first_party_authkit(
+            extra_audiences=settings.extra_audiences,
+            allowed_client_ids=settings.allowed_client_ids,
+            **kwargs,
+        )
 
     raise RuntimeError(f"Unknown TSPI_MCP_AUTH mode: {mode!r} (use none|jwt|workos).")
+
+
+def build_first_party_authkit(*, extra_audiences, allowed_client_ids, **authkit_kwargs):
+    """AuthKitProvider that ALSO accepts access tokens from named first-party apps.
+
+    Default AuthKit validation (aud == this server's resource URL) is tried first and is
+    unchanged. Only if it fails, the token is checked again against the same AuthKit issuer and
+    JWKS with aud in `extra_audiences`, and is then accepted only when its `client_id` claim is
+    one of `allowed_client_ids`. Tokens from any other app with the environment audience are
+    rejected, so this does not open the server to every app in the WorkOS environment.
+    """
+    import logging
+
+    from fastmcp.server.auth.providers.jwt import JWTVerifier
+    from fastmcp.server.auth.providers.workos import AuthKitProvider
+
+    log = logging.getLogger("tspi_mcp.identity")
+    allowed = frozenset(allowed_client_ids)
+
+    class FirstPartyAuthKitProvider(AuthKitProvider):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self._first_party_verifier = JWTVerifier(
+                jwks_uri=f"{self.authkit_domain}/oauth2/jwks",
+                issuer=self.authkit_domain,
+                algorithm="RS256",
+                audience=list(extra_audiences),
+            )
+
+        async def verify_token(self, token):
+            tok = await super().verify_token(token)
+            if tok is not None:
+                return tok
+            tok = await self._first_party_verifier.verify_token(token)
+            if tok is None:
+                return None
+            client_id = (tok.claims or {}).get("client_id")
+            if client_id not in allowed:
+                log.warning("Bearer token rejected: client_id %r is not an allowed first-party app",
+                            client_id)
+                return None
+            return tok
+
+    return FirstPartyAuthKitProvider(**authkit_kwargs)
 
 
 def current_identity_ext() -> dict:
@@ -48,8 +104,10 @@ def current_identity_ext() -> dict:
     if tok is not None:
         claims = getattr(tok, "claims", None) or {}
         user = claims.get(settings.claim_user) or getattr(tok, "subject", None) or settings.clinician_id
-        role = claims.get(settings.claim_role) or settings.clinician_role
-        clinic = claims.get(settings.claim_clinic) or settings.clinic_id
+        # No fallback to the static pilot identity for a real token: a signed-in user with no
+        # role/clinic in their WorkOS metadata must NOT silently become a clinician.
+        role = claims.get(settings.claim_role) or "unassigned"
+        clinic = claims.get(settings.claim_clinic) or None
         email = claims.get(settings.claim_email)
         first = claims.get(settings.claim_first_name)
         last = claims.get(settings.claim_last_name)

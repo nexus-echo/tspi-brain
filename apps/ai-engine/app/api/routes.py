@@ -45,7 +45,8 @@ def _actor(p: Principal, fallback_id: str | None = None) -> dict:
 @router.post("/screen", tags=["safety"])
 async def screen_endpoint(patient: PatientInput,
                           p: Principal = Depends(require_role(
-                              "clinic_staff", "clinician", "reviewer", "service"))) -> dict:
+                              "patient", "clinic_staff", "clinician", "reviewer",
+                              "service"))) -> dict:
     """Phase 7 — deterministic red-flag screening. Runs before any TSPI reasoning.
 
     Conservative by design: it may only escalate care, never withhold it.
@@ -60,7 +61,8 @@ async def screen_endpoint(patient: PatientInput,
 @router.post("/analyze", response_model=AnalysisResult, tags=["diagnosis"])
 async def analyze_endpoint(patient: PatientInput,
                            p: Principal = Depends(require_role(
-                               "clinic_staff", "clinician", "reviewer", "service"))) -> AnalysisResult:
+                               "patient", "clinic_staff", "clinician", "reviewer",
+                               "service"))) -> AnalysisResult:
     _require_consent(patient, "ai_analysis")
     patient = deid.intake(patient)          # P4: strip + store PII before any pipeline/LLM step
     result = await analyze(patient)
@@ -73,15 +75,19 @@ async def analyze_endpoint(patient: PatientInput,
 async def report_endpoint(patient: PatientInput,
                           report_language: str | None = None,
                           p: Principal = Depends(require_role(
-                              "clinic_staff", "clinician", "reviewer", "service"))) -> CaseReport:
+                              "patient", "clinic_staff", "clinician", "reviewer",
+                              "service"))) -> CaseReport:
     _require_consent(patient, "ai_analysis")
     patient = deid.intake(patient)          # P4: strip + store PII before any pipeline/LLM step
     report = await build_report(patient, report_language=report_language)
     # Phase B — stamp ownership/tenant scope (de-identified keys, never PII).
+    # Self-service patients (TSPI Digital): the patient's own user id is the case subject, so only
+    # they (and reviewing clinicians) can read it. The report stays an unvalidated AI draft
+    # (deliverable=false) until a TSPI clinician approves it; patients can never write to it.
     store.set_report_owner(
         report.report_id,
         clinician_id=(p.id if p.role in ("clinician", "reviewer") else None),
-        case_subject=patient.case_id,
+        case_subject=(p.id if p.role == "patient" else patient.case_id),
         clinic_id=p.clinic_id)
     store.stamp_report_actor(report.report_id, "created_by", _actor(p))   # who generated the plan
     store.audit("report", case_id=patient.case_id, report_id=report.report_id,

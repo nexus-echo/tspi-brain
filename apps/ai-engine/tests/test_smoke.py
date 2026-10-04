@@ -840,9 +840,28 @@ def test_missing_token_is_401_when_auth_on():
     with _auth_on():
         assert client.post("/analyze", json=_PATIENT).status_code == 401
 
-def test_patient_cannot_generate_but_clinician_can():
+def test_patient_self_service_generates_own_unreviewed_draft():
+    """TSPI Digital: a patient may screen, analyse and generate their OWN draft, read it while it
+    is still an unreviewed AI draft, and never write to it (approval stays with clinicians)."""
     with _auth_on():
-        assert client.post("/report", json=_PT, headers=_hdr("patient", "CASE-P1")).status_code == 403
+        assert client.post("/screen", json=_PT, headers=_hdr("patient", "user_pat1")).status_code == 200
+        assert client.post("/analyze", json=_PT, headers=_hdr("patient", "user_pat1")).status_code == 200
+        r = client.post("/report", json=_PT, headers=_hdr("patient", "user_pat1"))
+        assert r.status_code == 200
+        rid = r.json()["report_id"]
+        own = client.get(f"/reports/{rid}", headers=_hdr("patient", "user_pat1"))
+        assert own.status_code == 200 and own.json()["deliverable"] is False
+        # another patient cannot read it
+        assert client.get(f"/reports/{rid}", headers=_hdr("patient", "user_pat2")).status_code == 403
+        # patient cannot approve or edit
+        assert client.post("/validate", json={"report_id": rid, "doctor_id": "user_pat1",
+                                              "decision": "approve"},
+                           headers=_hdr("patient", "user_pat1")).status_code == 403
+        # a clinician can still review it
+        assert client.get(f"/reports/{rid}", headers=_hdr("clinician", "dr.a")).status_code == 200
+
+def test_clinician_can_generate():
+    with _auth_on():
         r = client.post("/report", json=_PT, headers=_hdr("clinician", "dr.a", clinic="clinicA"))
         assert r.status_code == 200
 

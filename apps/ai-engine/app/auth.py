@@ -88,7 +88,8 @@ def check_report_access(principal: Principal, report: dict, *, write: bool) -> N
     """Tenant/ownership gate for a specific report. Raises 403 when not permitted.
 
     Rules (§4.3):
-      patient      -> read own case subject AND only when approved (deliverable); no writes
+      patient      -> read own case subject when approved (deliverable), OR an unapproved draft
+                      the patient generated themselves (self-service, marked AI draft); no writes
       clinic_staff -> read within own clinic; no clinical writes
       clinician    -> read/write own cases
       reviewer     -> read/write across
@@ -120,6 +121,10 @@ def check_report_access(principal: Principal, report: dict, *, write: bool) -> N
             raise HTTPException(status_code=403, detail="Patients cannot modify plans.")
         if report.get("owner_case_subject") == principal.id and deliverable:
             return
+        created_by = (report.get("payload") or {}).get("created_by") or {}
+        if (report.get("owner_case_subject") == principal.id
+                and created_by.get("role") == "patient" and created_by.get("id") == principal.id):
+            return                                # own self-service draft (unreviewed)
         raise HTTPException(status_code=403,
                             detail="Patients may only view their own APPROVED plan.")
     raise HTTPException(status_code=403, detail="Not permitted.")

@@ -33,6 +33,10 @@ RULES FOR THE ASSISTANT:
 - Always run tspi_screen_red_flags first for a new case.
 - A generated treatment plan is an AI DRAFT pending physician review; it is NOT for patient use
   until a clinician approves it with tspi_approve_treatment_plan.
+- If tspi_whoami returns role 'patient' (self-service user), the patient may see their own draft,
+  but it must be labelled UNREVIEWED AI DRAFT (not reviewed or approved by a TSPI doctor, not
+  medical advice) and they must be told to contact TSPI Digital for doctor review. Never call
+  approve, update or record_outcome for a patient.
 """
 
 from .identity import build_auth

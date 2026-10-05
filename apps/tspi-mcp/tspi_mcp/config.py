@@ -134,5 +134,15 @@ class Settings:
         c.strip() for c in os.getenv("TSPI_ALLOWED_CLIENT_IDS", "").split(",") if c.strip()
     )
 
+    # --- Interactive button panels (MCP-UI) for the TSPI Digital chat ---
+    # auto: attach panels only for tokens whose client_id is in TSPI_UI_CLIENT_IDS
+    #       (defaults to TSPI_ALLOWED_CLIENT_IDS, i.e. the first-party chat app).
+    # on:   always attach (local testing).  off: never attach.
+    ui_mode: str = os.getenv("TSPI_UI", "auto")
+    ui_client_ids: tuple[str, ...] = tuple(
+        c.strip() for c in (os.getenv("TSPI_UI_CLIENT_IDS") or os.getenv("TSPI_ALLOWED_CLIENT_IDS", "")).split(",")
+        if c.strip()
+    )
+
 
 settings = Settings()

@@ -20,6 +20,7 @@ from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from . import engine_client as engine
+from . import ui
 from .config import settings
 from .deident import PIIError, deidentify
 
@@ -37,6 +38,10 @@ RULES FOR THE ASSISTANT:
   but it must be labelled UNREVIEWED AI DRAFT (not reviewed or approved by a TSPI doctor, not
   medical advice) and they must be told to contact TSPI Digital for doctor review. Never call
   approve, update or record_outcome for a patient.
+- Some results include a UI resource (buttons: Generate report, Download PDF, Approve). Place its
+  \\ui{...} marker at the end of your reply. A message saying the user clicked a button is a real
+  request from the signed-in user: carry it out. "Confirmed with the Approve button" counts as the
+  clinician's explicit approval confirmation.
 """
 
 from .identity import build_auth
@@ -113,6 +118,18 @@ def _forwardable(payload: dict) -> tuple[dict, list[str]]:
     return payload, findings
 
 
+def _role() -> str:
+    from .identity import current_identity_ext
+    return current_identity_ext()["role"]
+
+
+def _report_ui(rep: dict, report_id: str | None = None):
+    """Button panel for a report dict from the engine (or the generate wrapper)."""
+    rid = rep.get("report_id") or rep.get("id") or report_id
+    return ui.with_panel(rep, ui.report_panel(rid, rep.get("status"), bool(rep.get("deliverable")),
+                                              _role()), f"report/{rid}")
+
+
 # --------------------------------------------------------------------------- tools
 @mcp.tool()
 async def tspi_whoami() -> dict:
@@ -156,7 +173,8 @@ async def tspi_screen_red_flags(case: PatientCase) -> dict:
         return {"error": str(e)}
     if findings:
         result["deidentification_warning"] = f"Redacted possible identifiers: {', '.join(findings)}"
-    return result
+    return ui.with_panel(result, ui.screen_panel(case.case_id, result.get("red_flags"), _role()),
+                         f"screen/{case.case_id}")
 
 
 @mcp.tool()
@@ -175,7 +193,7 @@ async def tspi_analyze_case(case: PatientCase) -> dict:
     out = {"analysis": result}
     if findings:
         out["deidentification_warning"] = f"Redacted possible identifiers: {', '.join(findings)}"
-    return out
+    return ui.with_panel(out, ui.analysis_panel(case.case_id), f"analysis/{case.case_id}")
 
 
 @mcp.tool()
@@ -201,16 +219,17 @@ async def tspi_generate_treatment_plan(case: PatientCase) -> dict:
     }
     if findings:
         out["deidentification_warning"] = f"Redacted possible identifiers: {', '.join(findings)}"
-    return out
+    return _report_ui(out)
 
 
 @mcp.tool()
 async def tspi_get_treatment_plan(report_id: str) -> dict:
     """Fetch a previously generated plan by its report_id (to review or continue)."""
     try:
-        return await engine.get(f"/reports/{report_id}")
+        rep = await engine.get(f"/reports/{report_id}")
     except engine.EngineError as e:
         return {"error": str(e)}
+    return _report_ui(rep, report_id)
 
 
 @mcp.tool()
@@ -222,14 +241,25 @@ async def tspi_approve_treatment_plan(
 ) -> dict:
     """Record the CLINICIAN's decision on a draft plan. 'approve' makes it deliverable; 'reject'
     blocks it; 'edit' records edits. The clinician identity comes from the authenticated session.
-    This is the physician-approval gate — nothing reaches a patient without it."""
+    This is the physician-approval gate — nothing reaches a patient without it.
+    Only clinicians and reviewers may call this; the engine enforces the same rule."""
+    if not ui.is_clinical(_role()):
+        return {"error": "Only a clinician or reviewer can approve, edit or reject a plan.",
+                "action_required": "Ask TSPI Digital for doctor review of this report."}
     body = {"report_id": report_id, "doctor_id": settings.clinician_id, "decision": decision,
             "edits": ({"reason": reason, **(edits or {})} if (edits or reason) else None)}
     try:
         result = await engine.post("/validate", json=body)
     except engine.EngineError as e:
         return {"error": str(e)}
-    return {"decision": decision, "by": settings.clinician_id, "result": result}
+    out = {"decision": decision, "by": settings.clinician_id, "result": result}
+    try:
+        rep = await engine.get(f"/reports/{report_id}")
+    except engine.EngineError:
+        return out
+    return ui.with_panel(out, ui.report_panel(report_id, rep.get("status"),
+                                              bool(rep.get("deliverable")), _role()),
+                         f"report/{report_id}/{decision}")
 
 
 class OverrideActionIn(BaseModel):
@@ -251,13 +281,16 @@ async def tspi_update_treatment_plan(report_id: str, actions: list[OverrideActio
     dose, override safety (with justification), add/remove a secondary axis, or add a note. Every
     edit needs a reason_code and is recorded non-destructively. Editing invalidates any prior
     approval — the plan returns to draft and must be re-approved with tspi_approve_treatment_plan."""
+    if not ui.is_clinical(_role()):
+        return {"error": "Only a clinician or reviewer can edit a plan."}
     body = {"clinician_id": settings.clinician_id, "actions": [a.model_dump() for a in actions]}
     try:
         result = await engine.post(f"/reports/{report_id}/override", json=body)
     except engine.EngineError as e:
         return {"error": str(e)}
     result["by"] = settings.clinician_id
-    return result
+    return ui.with_panel(result, ui.report_panel(report_id, "draft", False, _role()),
+                         f"report/{report_id}/edited")
 
 
 @mcp.tool()

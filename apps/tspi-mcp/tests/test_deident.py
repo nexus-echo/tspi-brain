@@ -96,3 +96,27 @@ def test_auth_jwt_builds_verifier_when_configured():
     for k in ("TSPI_MCP_AUTH", "TSPI_JWT_JWKS_URI", "TSPI_JWT_ISSUER", "TSPI_JWT_AUDIENCE"):
         os.environ.pop(k, None)
     reload(c); reload(idn)
+
+
+# ---- case-code false positives (TSPI-YYMMDD-HHMM-NN read as a phone) ----
+def test_case_code_is_not_a_phone():
+    payload = {"case_id": "TSPI-261008-0151-01", "age_band": "40s", "sex": "male",
+               "symptoms": "Insomnia; re TSPI-261008-0151-01 follow-up, see also CASE-250101-0900-02",
+               "labs": [{"analyte": "TSH", "value": 8.81, "unit": "uIU/mL"}],
+               "conditions": ["Bipolar disorder"], "medications": ["Thyroxine 125 mcg daily"]}
+    clean, findings = deidentify(payload, strict=True)
+    assert findings == []
+    assert clean["case_id"] == "TSPI-261008-0151-01"
+    assert "TSPI-261008-0151-01" in clean["symptoms"]
+
+
+def test_phone_still_caught_next_to_case_code():
+    with pytest.raises(PIIError):
+        deidentify({"case_id": "TSPI-261008-0151-01",
+                    "symptoms": "TSPI-261008-0151-01 call 98765 43210"}, strict=True)
+
+
+def test_numeric_or_contact_prefixed_case_id_not_exempt():
+    for cid in ("9876543210", "tel-9876543210", "PH-98765-43210"):
+        with pytest.raises(PIIError):
+            deidentify({"case_id": cid, "symptoms": "fatigue"}, strict=True)

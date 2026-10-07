@@ -49,6 +49,45 @@ _RULES = (
 )
 
 
+# ---- case-code exemption -------------------------------------------------------------------
+# A case code like "TSPI-261008-0151-01" contains 12 digits joined by dashes, which the raw phone
+# pattern reads as a phone number. Case codes are the de-identified key by design, so they are
+# shielded from the scan: (a) the request's own case_id, when it is shaped like a code (letter
+# prefix + dash-joined alphanumerics), and (b) any TSPI-/CASE- prefixed code in free text.
+# A bare-digit case_id (e.g. "9876543210") is NOT shielded and is still scanned.
+_CASE_CODE = re.compile(r"\b(?:TSPI|CASE)(?:-[A-Za-z0-9]+)+\b", re.IGNORECASE)
+_CODE_SHAPE = re.compile(r"[A-Za-z]{2,12}(?:[-_][A-Za-z0-9]{1,12}){1,6}")
+_CONTACT_PREFIX = {"tel", "ph", "phone", "mob", "mobile", "cell", "call", "whatsapp", "wa",
+                   "contact", "fax", "mrn", "hn", "id", "dob"}
+_SHIELD = "\uE000"   # private-use char: no digits/letters, so no rule can match it
+
+
+def is_case_code(value) -> bool:
+    """True if `value` is a letter-prefixed case code (safe to exempt from identifier scans)."""
+    if not isinstance(value, str) or len(value) > 60 or not _CODE_SHAPE.fullmatch(value.strip()):
+        return False
+    prefix = re.split(r"[-_]", value.strip(), 1)[0].lower()
+    return prefix not in _CONTACT_PREFIX
+
+
+def _shield_codes(text: str, case_id: str | None = None) -> tuple[str, list[str]]:
+    """Swap case codes for a placeholder char; returns (text, codes) for _unshield."""
+    codes: list[str] = []
+
+    def _keep(mo):
+        codes.append(mo.group(0))
+        return _SHIELD
+
+    if case_id and is_case_code(case_id):
+        text = re.sub(re.escape(case_id.strip()), _keep, text)
+    return _CASE_CODE.sub(_keep, text), codes
+
+
+def _unshield(text: str, codes: list[str]) -> str:
+    it = iter(codes)
+    return re.sub(_SHIELD, lambda _m: next(it), text)
+
+
 class PIILeak(RuntimeError):
     """Raised if identifiable information is about to reach the LLM."""
 
@@ -88,9 +127,10 @@ def get_identity(case_id: str) -> dict | None:
 
 
 # ---------------------------------------------------------------- scrub / guard
-def _scan(text: str) -> tuple[str, list[str], list[str]]:
+def _scan(text: str, case_id: str | None = None) -> tuple[str, list[str], list[str]]:
     """-> (redacted text, finding labels, masked shapes of each hit for diagnostics)."""
-    findings, shapes, out = [], [], text or ""
+    findings, shapes = [], []
+    out, codes = _shield_codes(text or "", case_id)
     for label, rx, accept in _RULES:
         hit = False
 
@@ -105,11 +145,11 @@ def _scan(text: str) -> tuple[str, list[str], list[str]]:
         out = rx.sub(_repl, out)
         if hit:
             findings.append(label)
-    return out, findings, shapes
+    return _unshield(out, codes), findings, shapes
 
 
-def scrub_text(text: str) -> tuple[str, list[str]]:
-    out, findings, _ = _scan(text)
+def scrub_text(text: str, case_id: str | None = None) -> tuple[str, list[str]]:
+    out, findings, _ = _scan(text, case_id)
     return out, findings
 
 
@@ -131,7 +171,7 @@ def assert_prompt_deidentified(prompt: str, case_id: str) -> None:
             if re.search(rf"(?<![\d.]){_digits(v)}(?![\d.])", compact):
                 raise PIILeak(f"PII ({k}) detected in LLM prompt for case {case_id}. Blocked.")
     # also catch raw identifiers that slipped into free text
-    _, findings, shapes = _scan(prompt)
+    _, findings, shapes = _scan(prompt, case_id)
     if findings:
         # shapes have digits masked (e.g. 'phone:dd ddd dddd') — safe to log, enough to locate the source
         raise PIILeak(f"Identifier(s) {findings} detected in LLM prompt for case {case_id}. "
@@ -163,7 +203,7 @@ def intake(patient):
         store.audit("pii_intake", case_id=patient.case_id, detail={"stored": True})
     # scrub any identifiers that leaked into free-text symptoms
     if getattr(patient, "symptoms", None):
-        clean, findings = scrub_text(patient.symptoms)
+        clean, findings = scrub_text(patient.symptoms, patient.case_id)
         if findings:
             patient.symptoms = clean
             store.audit("pii_scrub", case_id=patient.case_id, detail={"fields": findings})

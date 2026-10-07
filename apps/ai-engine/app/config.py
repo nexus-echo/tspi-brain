@@ -18,10 +18,10 @@ class Settings(BaseSettings):
     # Embeddings
     embedding_backend: str = "hash"      # hash (no deps) | api (OpenAI-compatible) | ollama (local)
     embedding_dim: int = 384             # MUST match the chosen model's output dimension
-    embedding_api_base: str = "https://api.openai.com/v1"
+    embedding_api_base: str = "https://openrouter.ai/api/v1"
     embedding_api_key: str | None = None
-    embedding_model: str = "text-embedding-3-small"
-    embedding_api_send_dimensions: bool = True  # set False for providers that don't accept the dimensions param (e.g. OpenRouter)
+    embedding_model: str = "baai/bge-m3"          # 1024-d (OpenRouter)
+    embedding_api_send_dimensions: bool = False  # True for OpenAI; False for providers that don't accept the dimensions param (e.g. OpenRouter)
     ollama_embedding_model: str = "bge-m3"   # local Ollama embed model (multilingual)
 
     # LLM
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     groq_api_key: str | None = None
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+    openrouter_model: str = "google/gemma-4-26b-a4b-it"
 
     # --- Lab/imaging extraction (LOCAL-ONLY by governance decision) ---
     # Reads uploaded reports (images, scanned PDFs) with a local Ollama VISION model, and

@@ -95,7 +95,7 @@ class EmbeddingProvider:
             r = c.post(url, json=payload, headers=headers)
             r.raise_for_status()
             data = sorted(r.json()["data"], key=lambda d: d["index"])
-            return [d["embedding"] for d in data]
+            return self._check_dim([d["embedding"] for d in data])
 
     async def _api_embed_async(self, texts: list[str]) -> list[list[float]]:
         import httpx
@@ -104,7 +104,7 @@ class EmbeddingProvider:
             r = await c.post(url, json=payload, headers=headers)
             r.raise_for_status()
             data = sorted(r.json()["data"], key=lambda d: d["index"])
-            return [d["embedding"] for d in data]
+            return self._check_dim([d["embedding"] for d in data])
 
     # --- ollama backend ---
     def _ollama_embed(self, texts: list[str]) -> list[list[float]]:

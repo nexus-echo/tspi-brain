@@ -6,14 +6,13 @@ Docs: http://localhost:8000/docs
 """
 from __future__ import annotations
 
-import logging
-
 from fastapi import FastAPI
 
 from app.api.routes import router
 from app.config import settings
+from app.error_logging import ErrorLoggingMiddleware, configure_logging
 
-logging.basicConfig(level=settings.tspi_log_level)
+configure_logging(settings.tspi_log_level, settings.tspi_log_format)
 
 app = FastAPI(
     title="TSPI AI Brain",
@@ -26,6 +25,8 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# Outermost app-level handler: logs full traceback + error_id for any unhandled exception.
+app.add_middleware(ErrorLoggingMiddleware)
 app.include_router(router)
 
 

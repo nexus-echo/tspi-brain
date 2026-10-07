@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     # App
     tspi_env: str = "local"
     tspi_log_level: str = "INFO"
+    tspi_log_format: str = "text"        # text | json (json keeps each traceback on one line for log shippers)
 
     # Data
     database_url: str | None = None

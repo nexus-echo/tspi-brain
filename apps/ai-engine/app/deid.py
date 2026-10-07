@@ -17,9 +17,36 @@ from app.config import settings
 _FIELDS = ["full_name", "dob", "mrn", "phone", "email", "address"]
 
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-_PHONE = re.compile(r"(?<!\d)(?:\+?\d[\d\s().-]{7,}\d)(?!\d)")
-_LONGID = re.compile(r"\b\d{7,}\b")
-_DOB = re.compile(r"\b(?:19|20)\d{2}[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])\b")
+_PHONE = re.compile(r"(?<![\d.])(?:\+?\d[\d\s().-]{7,}\d)(?![\d.])")
+# Long bare digit runs (MRN etc.). Not preceded/followed by '.' so float fractions don't match.
+_LONGID = re.compile(r"(?<![\d.])\d{7,}(?![\d.])")
+# A standalone decimal number (one dot between digit runs), e.g. 0.0833333 or 3.9 — never a phone.
+_DECIMAL = re.compile(r"(?<![\d.])\d+\.\d+(?![\d.])")
+
+
+def _looks_like_phone(m: str) -> bool:
+    """Filter regex hits from structured/clinical text: lab values, ranges ("3.9 - 6.1") and long
+    floats (0.08333333333) look like phone numbers to the raw pattern but are not."""
+    digits = sum(c.isdigit() for c in m)
+    if not 9 <= digits <= 15:            # E.164 max 15; real local numbers (IN/TH) have >= 9
+        return False
+    if _DECIMAL.search(m):               # contains a decimal number -> measurement, not a phone
+        return False
+    return True
+
+
+def _mask(m: str) -> str:
+    """Shape of a hit with letters/digits hidden (safe to log): '+66 81 234 5678' -> '+dd dd ddd dddd'."""
+    return re.sub(r"\d", "d", re.sub(r"[A-Za-z]", "x", m))[:40]
+
+
+# No date pattern: lab/collection dates are legitimate clinical data. The stored DOB is still
+# blocked by the exact-value identity check in assert_prompt_deidentified().
+_RULES = (
+    ("email", _EMAIL, None),
+    ("phone", _PHONE, _looks_like_phone),
+    ("identifier", _LONGID, None),
+)
 
 
 class PIILeak(RuntimeError):
@@ -61,27 +88,54 @@ def get_identity(case_id: str) -> dict | None:
 
 
 # ---------------------------------------------------------------- scrub / guard
-def scrub_text(text: str) -> tuple[str, list[str]]:
-    findings, out = [], text or ""
-    for label, rx in (("email", _EMAIL), ("date_of_birth", _DOB), ("phone", _PHONE),
-                      ("identifier", _LONGID)):
-        if rx.search(out):
+def _scan(text: str) -> tuple[str, list[str], list[str]]:
+    """-> (redacted text, finding labels, masked shapes of each hit for diagnostics)."""
+    findings, shapes, out = [], [], text or ""
+    for label, rx, accept in _RULES:
+        hit = False
+
+        def _repl(mo, label=label, accept=accept):
+            nonlocal hit
+            if accept and not accept(mo.group(0)):
+                return mo.group(0)
+            hit = True
+            shapes.append(f"{label}:{_mask(mo.group(0))}")
+            return f"[REDACTED_{label.upper()}]"
+
+        out = rx.sub(_repl, out)
+        if hit:
             findings.append(label)
-            out = rx.sub(f"[REDACTED_{label.upper()}]", out)
+    return out, findings, shapes
+
+
+def scrub_text(text: str) -> tuple[str, list[str]]:
+    out, findings, _ = _scan(text)
     return out, findings
+
+
+def _digits(v) -> str:
+    return re.sub(r"\D", "", str(v))
 
 
 def assert_prompt_deidentified(prompt: str, case_id: str) -> None:
     """Guard: the stored identity's values must NOT appear in an LLM prompt. Fail closed."""
     ident = get_identity(case_id) or {}
     low = prompt.lower()
+    compact = None
     for k, v in ident.items():
         if v and str(v).strip() and str(v).lower() in low:
             raise PIILeak(f"PII ({k}) detected in LLM prompt for case {case_id}. Blocked.")
+        # phone/MRN may be re-formatted (spaces, dashes, parens) — also compare with those removed
+        if k in ("phone", "mrn") and len(_digits(v)) >= 7:
+            compact = compact if compact is not None else re.sub(r"[\s()-]", "", prompt)
+            if re.search(rf"(?<![\d.]){_digits(v)}(?![\d.])", compact):
+                raise PIILeak(f"PII ({k}) detected in LLM prompt for case {case_id}. Blocked.")
     # also catch raw identifiers that slipped into free text
-    _, findings = scrub_text(prompt)
+    _, findings, shapes = _scan(prompt)
     if findings:
-        raise PIILeak(f"Identifier(s) {findings} detected in LLM prompt for case {case_id}. Blocked.")
+        # shapes have digits masked (e.g. 'phone:dd ddd dddd') — safe to log, enough to locate the source
+        raise PIILeak(f"Identifier(s) {findings} detected in LLM prompt for case {case_id}. "
+                      f"Blocked. Matched shapes: {shapes[:5]}")
 
 
 # ---------------------------------------------------------------- re-identify (render only)

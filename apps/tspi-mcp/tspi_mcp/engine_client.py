@@ -16,6 +16,9 @@ from .config import settings
 
 _log = logging.getLogger("tspi_mcp.engine")
 
+# Endpoints that run the LLM inside the engine -> use the longer report timeout.
+_SLOW_PATHS = {"/report", "/extract"}
+
 
 class EngineError(RuntimeError):
     """A failed engine call, with an actionable message."""
@@ -100,9 +103,18 @@ def _log_http_error(method: str, path: str, resp: httpx.Response) -> None:
 async def _request(method: str, path: str, *, json: Any = None,
                    params: dict | None = None) -> Any:
     url = f"{settings.engine_url.rstrip('/')}{path}"
+    timeout = settings.report_timeout_s if path in _SLOW_PATHS else settings.http_timeout_s
     try:
-        async with httpx.AsyncClient(timeout=settings.http_timeout_s) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.request(method, url, json=json, params=params, headers=_headers())
+    except httpx.TimeoutException as e:
+        _log.error("Engine call timed out after %.0fs: %s %s (%s)", timeout, method, path,
+                   type(e).__name__, exc_info=True)
+        raise EngineError(
+            f"The TSPI engine did not respond within {timeout:.0f}s ({method} {path}). Report "
+            "generation runs an LLM and can be slow — try again shortly. If it keeps happening, "
+            "raise TSPI_REPORT_TIMEOUT on the MCP (keep it above the engine's REPORT_LLM_BUDGET_S)."
+        ) from e
     except httpx.ConnectError as e:
         _log.error("Engine unreachable: %s %s", method, path, exc_info=True)
         raise EngineError(

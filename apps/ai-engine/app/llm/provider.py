@@ -68,7 +68,7 @@ class LLMProvider:
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
         }
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=settings.llm_timeout_s) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
@@ -81,7 +81,7 @@ class LLMProvider:
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
         }
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=settings.llm_timeout_s) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
@@ -89,7 +89,7 @@ class LLMProvider:
     async def _ollama(self, prompt: str) -> str:
         url = f"{settings.ollama_base_url.rstrip('/')}/api/generate"
         payload = {"model": settings.ollama_model, "prompt": prompt, "stream": False}
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=settings.llm_timeout_s) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             return resp.json().get("response", "")

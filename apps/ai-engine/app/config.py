@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "google/gemma-4-26b-a4b-it"
+    # Per-call LLM HTTP timeout, and the TOTAL time budget for report prose across the whole
+    # provider chain. When the budget is hit, /report returns the deterministic report instead.
+    # Keep report_llm_budget_s comfortably below the callers' timeouts (MCP TSPI_REPORT_TIMEOUT,
+    # any reverse proxy / load balancer idle timeout).
+    llm_timeout_s: float = 600.0          # 10 min
+    report_llm_budget_s: float = 600.0    # 10 min
 
     # --- Lab/imaging extraction (LOCAL-ONLY by governance decision) ---
     # Reads uploaded reports (images, scanned PDFs) with a local Ollama VISION model, and

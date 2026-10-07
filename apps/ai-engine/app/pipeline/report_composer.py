@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
+from app.config import settings
 from app.knowledge import retrieval
 from app.llm.provider import LLMProvider
 from app.schemas import AnalysisResult, CaseReport, ModulePick
@@ -79,7 +80,7 @@ async def compose(analysis: AnalysisResult, modules: list[ModulePick], llm: LLMP
             "do not invent modules or labs. Sections in order: "
             + "; ".join(_SECTION_ORDER)
             + ".\n\nSTRUCTURED ANALYSIS:\n"
-            + analysis.model_dump_json(indent=2)
+            + analysis.model_dump_json()          # compact JSON: fewer tokens -> faster LLM
             + "\n\nMODULE PLAN:\n"
             + "\n".join(m.model_dump_json() for m in modules)
             + context
@@ -87,8 +88,12 @@ async def compose(analysis: AnalysisResult, modules: list[ModulePick], llm: LLMP
         # P4 guard: the LLM must never see PII. Fail closed if any identifier is in the prompt.
         from app import deid
         deid.assert_prompt_deidentified(prompt, analysis.case_id)
+        budget = settings.report_llm_budget_s
         try:
-            markdown = await llm.complete(prompt)
+            markdown = await asyncio.wait_for(llm.complete(prompt), timeout=budget)
+        except asyncio.TimeoutError:
+            _log.warning("LLM report composition exceeded %.0fs budget for case %s; "
+                         "using deterministic report", budget, analysis.case_id)
         except Exception:  # noqa: BLE001 — fall back to deterministic report
             _log.warning("LLM report composition failed for case %s; using deterministic report",
                          analysis.case_id, exc_info=True)

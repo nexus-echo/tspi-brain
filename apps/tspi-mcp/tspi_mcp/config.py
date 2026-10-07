@@ -72,6 +72,13 @@ class Settings:
         os.getenv("TSPI_HTTP_TIMEOUT", "60")
     )
 
+    # /report (and /extract) run the LLM inside the engine and can take minutes. Must be LONGER
+    # than the engine's REPORT_LLM_BUDGET_S (default 600s = 10 min); 660s leaves
+    # 1 min for the non-LLM pipeline steps so the engine's fallback report still gets back.
+    report_timeout_s: float = float(
+        os.getenv("TSPI_REPORT_TIMEOUT", "660")
+    )
+
     # --- OAuth for public/remote MCP surface ---
 
     # none = no incoming auth

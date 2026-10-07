@@ -16,6 +16,10 @@ from app.config import settings
 from app.llm.provider import OllamaLocal
 from app.schemas import ExtractedLab, ExtractionResult
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif")
 
 _PROMPT = (
@@ -54,6 +58,7 @@ def _pdf_text(data: bytes) -> str:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             return "\n".join((pg.extract_text() or "") for pg in pdf.pages)
     except Exception:
+        _log.warning("PDF text extraction failed", exc_info=True)
         return ""
 
 
@@ -72,6 +77,7 @@ def _pdf_page_images(data: bytes, max_pages: int) -> list[str]:
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # ~144 dpi
             out.append(_b64(pix.tobytes("png")))
     except Exception:
+        _log.warning("PDF page rasterization failed after %d page(s)", len(out), exc_info=True)
         return out
     return out
 
@@ -184,6 +190,7 @@ async def extract_from_file(data: bytes, mime: str, filename: str,
             res.labs = _to_labs(obj.get("labs"))
             _apply_imaging(res, obj)
         except Exception as e:  # noqa: BLE001
+            _log.warning("Vision extraction failed", exc_info=True)
             res.notes = f"vision-unavailable:{type(e).__name__}"
         return res
 
@@ -199,6 +206,7 @@ async def extract_from_file(data: bytes, mime: str, filename: str,
                     res.labs = _to_labs(obj.get("labs"))
                     _apply_imaging(res, obj)
                 except Exception as e:  # noqa: BLE001
+                    _log.warning("Text-LLM extraction failed (PDF); using heuristic", exc_info=True)
                     res.notes = f"text-llm-unavailable:{type(e).__name__}; used heuristic"
             if not res.labs and not res.imaging_impression:
                 res.labs = _heuristic(text)
@@ -221,6 +229,7 @@ async def extract_from_file(data: bytes, mime: str, filename: str,
             res.labs = _to_labs(obj.get("labs"))
             _apply_imaging(res, obj)
         except Exception as e:  # noqa: BLE001
+            _log.warning("Vision extraction failed", exc_info=True)
             res.notes = f"vision-unavailable:{type(e).__name__}"
         return res
 
@@ -237,6 +246,7 @@ async def extract_from_file(data: bytes, mime: str, filename: str,
             res.labs = _to_labs(obj.get("labs"))
             _apply_imaging(res, obj)
         except Exception as e:  # noqa: BLE001
+            _log.warning("Text-LLM extraction failed; using heuristic", exc_info=True)
             res.notes = f"text-llm-unavailable:{type(e).__name__}; used heuristic"
     if not res.labs and not res.imaging_impression:
         res.labs = _heuristic(text)

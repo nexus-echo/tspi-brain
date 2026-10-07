@@ -10,6 +10,10 @@ import networkx as nx
 
 from app.schemas import AxisScore, Severity
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 _SEVERITY_WEIGHT = {
     Severity.optimal: 0.0,
     Severity.subclinical: 0.33,
@@ -42,6 +46,7 @@ def root_cause(axis_scores: list[AxisScore]) -> tuple[list[str], list[AxisScore]
     try:
         ranks = nx.pagerank(g, personalization=personalization) if g.number_of_edges() else {}
     except Exception:  # noqa: BLE001
+        _log.warning("PageRank failed; using degree-based fallback ranking", exc_info=True)
         ranks = {n: weights.get(n, 0.0) + 0.1 * g.out_degree(n) for n in g.nodes}
 
     present = list(axis_scores)

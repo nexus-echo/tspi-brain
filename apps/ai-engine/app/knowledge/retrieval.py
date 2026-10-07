@@ -70,7 +70,7 @@ def retrieve(query: str, kind: str | None = None, k: int = 5) -> list[dict]:
             _cache_put(key, vec)
         return _search_sync(vec, kind, k)
     except Exception as e:  # noqa: BLE001 — RAG is optional
-        _log.debug("retrieve skipped: %s", e)
+        _log.warning("RAG retrieve failed: %s", e, exc_info=True)
         return []
 
 
@@ -88,5 +88,5 @@ async def aretrieve(query: str, kind: str | None = None, k: int = 5) -> list[dic
             _cache_put(key, vec)
         return await asyncio.to_thread(_search_sync, vec, kind, k)
     except Exception as e:  # noqa: BLE001 — RAG is optional
-        _log.debug("aretrieve skipped: %s", e)
+        _log.warning("RAG aretrieve failed: %s", e, exc_info=True)
         return []

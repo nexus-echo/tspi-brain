@@ -21,6 +21,10 @@ from app.pipeline import (
 )
 from app.schemas import AnalysisResult, CaseReport, PatientInput
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 _repo = KnowledgeRepo()
 _llm = LLMProvider()
 
@@ -38,6 +42,7 @@ def _axis_master_version() -> str | None:
         p = Path(__file__).resolve().parent.parent.parent / "data" / "tspi_axes_39.json"
         return json.loads(p.read_text(encoding="utf-8")).get("framework_version")
     except Exception:  # noqa: BLE001
+        _log.warning("Could not read axis master version", exc_info=True)
         return None
 
 

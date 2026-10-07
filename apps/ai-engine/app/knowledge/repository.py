@@ -16,6 +16,10 @@ from pathlib import Path
 from app.knowledge.db import get_session, init_db
 from app.knowledge.models import Axis, Domain, Product
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 _DATA = Path(__file__).resolve().parent.parent.parent / "data"
 
 
@@ -78,7 +82,7 @@ class KnowledgeRepo:
                 from scripts.seed_db import seed_all
                 seed_all()
             except Exception:  # noqa: BLE001 — DB stays empty; axis() degrades gracefully
-                pass
+                _log.warning("Knowledge DB auto-seed failed; axis() will degrade", exc_info=True)
 
     def axis(self, code: str) -> dict:
         s = get_session()

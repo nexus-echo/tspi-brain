@@ -6,11 +6,15 @@ messages the chat model can relay to the clinician.
 """
 from __future__ import annotations
 
+import json as _json
+import logging
 from typing import Any
 
 import httpx
 
 from .config import settings
+
+_log = logging.getLogger("tspi_mcp.engine")
 
 
 class EngineError(RuntimeError):
@@ -46,8 +50,51 @@ def _explain(status: int, body: str) -> str:
     if status == 404:
         return "The engine could not find that record (404). Check the report_id / case_id."
     if status == 422:
+        try:
+            data = _json.loads(body)
+        except ValueError:
+            data = {}
+        if isinstance(data, dict) and data.get("error") == "pii_detected":
+            # Engine's fail-closed P4 guard (message is already masked / PII-free).
+            return ("The engine blocked this request because patient identifiers (e.g. a phone "
+                    "number, ID or email) were detected in the case data (422). Remove them from "
+                    f"the symptoms/notes and resend. Engine detail: {data.get('detail', '')[:300]}")
         return f"The engine rejected the input as invalid (422): {body[:400]}"
+    if status >= 500:
+        try:
+            data = _json.loads(body)
+        except ValueError:
+            data = {}
+        eid = data.get("error_id") if isinstance(data, dict) else None
+        if eid:
+            return (f"The TSPI engine hit an internal error (HTTP {status}). Share error_id "
+                    f"{eid} with the engine admin to find it in the logs.")
     return f"The engine returned HTTP {status}: {body[:400]}"
+
+
+def _log_http_error(method: str, path: str, resp: httpx.Response) -> None:
+    """Log a failed engine call. The engine's traceback lives in the ENGINE log — we log its
+    error_id/request_id so the two can be joined. Request bodies are never logged (case data);
+    4xx response bodies are not logged either (validation errors can echo input), except the
+    engine's PII-guard message, which is already masked."""
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    ids = {"status": resp.status_code,
+           "engine_error_id": data.get("error_id") or resp.headers.get("x-error-id"),
+           "engine_request_id": data.get("request_id") or resp.headers.get("x-request-id")}
+    if resp.status_code >= 500:
+        _log.error("Engine %s %s -> HTTP %s (engine error_id=%s request_id=%s) body=%s",
+                   method, path, resp.status_code, ids["engine_error_id"],
+                   ids["engine_request_id"], resp.text[:500], extra=ids)
+    elif data.get("error") == "pii_detected":
+        _log.warning("Engine %s %s -> 422 PII guard: %s", method, path,
+                     str(data.get("detail"))[:300], extra=ids)
+    else:
+        _log.warning("Engine %s %s -> HTTP %s (request_id=%s)", method, path, resp.status_code,
+                     ids["engine_request_id"], extra=ids)
 
 
 async def _request(method: str, path: str, *, json: Any = None,
@@ -57,14 +104,17 @@ async def _request(method: str, path: str, *, json: Any = None,
         async with httpx.AsyncClient(timeout=settings.http_timeout_s) as client:
             resp = await client.request(method, url, json=json, params=params, headers=_headers())
     except httpx.ConnectError as e:
+        _log.error("Engine unreachable: %s %s", method, path, exc_info=True)
         raise EngineError(
             f"Cannot reach the TSPI engine at {settings.engine_url}. Is it running? "
             f"(set TSPI_ENGINE_URL if it lives elsewhere.) Details: {e}"
         ) from e
     except httpx.HTTPError as e:
+        _log.error("Network error calling engine: %s %s", method, path, exc_info=True)
         raise EngineError(f"Network error calling the TSPI engine: {e}") from e
 
     if resp.status_code >= 400:
+        _log_http_error(method, path, resp)
         raise EngineError(_explain(resp.status_code, resp.text))
     if not resp.content:
         return {}

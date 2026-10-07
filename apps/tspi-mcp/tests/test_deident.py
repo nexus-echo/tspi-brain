@@ -26,8 +26,24 @@ def test_lenient_mode_redacts_and_reports():
         {"case_id": "C1", "symptoms": "call 090-123-4567, dob 1980-05-01, id 12345678"},
         strict=False)
     assert "email" not in findings
-    assert {"phone", "date_of_birth", "identifier"} <= set(findings)
+    assert {"phone", "identifier"} <= set(findings)
+    assert "date_of_birth" not in findings          # date check removed (lab dates are clinical data)
     assert "REDACTED" in clean["symptoms"]
+
+
+def test_lab_values_ranges_and_dates_are_not_pii():
+    payload = {"case_id": "C1",
+               "symptoms": "since 2026-09-01, HbA1c 5.6 (4.0 - 5.6), score 0.08333333333333333",
+               "labs": [{"analyte": "Glucose", "value": "5.6", "reference": "3.9 - 6.1 mmol/L"}]}
+    clean, findings = deidentify(payload, strict=True)
+    assert findings == []
+    assert clean["labs"][0]["reference"] == "3.9 - 6.1 mmol/L"
+
+
+def test_real_phone_formats_still_blocked():
+    for phone in ("+66 81 234 5678", "98765 43210", "9876543210", "(022) 2345-6789"):
+        with pytest.raises(PIIError):
+            deidentify({"case_id": "C1", "symptoms": f"call {phone}"}, strict=True)
 
 
 def test_clean_input_passes_untouched():

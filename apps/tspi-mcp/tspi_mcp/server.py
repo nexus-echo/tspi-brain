@@ -23,6 +23,9 @@ from . import engine_client as engine
 from . import ui
 from .config import settings
 from .deident import PIIError, deidentify
+from .error_logging import ToolErrorLoggingMiddleware, configure_logging
+
+configure_logging()
 
 INSTRUCTIONS = """TSPI AI Brain — deterministic clinical decision-support.
 
@@ -74,6 +77,8 @@ mcp = FastMCP(
     instructions=INSTRUCTIONS,
     auth=auth_provider,
 )
+# Log the full traceback (+ error_id) for any exception escaping a tool. Arguments never logged.
+mcp.add_middleware(ToolErrorLoggingMiddleware())
 
 # --------------------------------------------------------------------------- input models
 class LabResultIn(BaseModel):

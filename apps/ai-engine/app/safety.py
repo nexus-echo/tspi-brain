@@ -16,6 +16,10 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 _DATA = Path(__file__).resolve().parent.parent / "data" / "safety_rules.json"
 
 
@@ -82,7 +86,7 @@ def check_modules(modules: list, medications: list[str], conditions: list[str]) 
                     try:
                         m.safety = ((m.safety + " | ") if getattr(m, "safety", None) else "") + note
                     except Exception:  # noqa: BLE001
-                        pass
+                        _log.warning("Could not annotate module %s with safety note", _code(m), exc_info=True)
 
     # per-module contraindications carried in the registry: flag when a patient med/condition
     # token (>=4 chars) literally appears in the module's contraindication note (conservative).

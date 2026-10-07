@@ -12,6 +12,10 @@ from app.knowledge import retrieval
 from app.llm.provider import LLMProvider
 from app.schemas import AnalysisResult, CaseReport, ModulePick
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 _SECTION_ORDER = (
     "Short Clinical Protocol (Step-1)",
     "Introduction (network-disorder framing)",
@@ -86,7 +90,8 @@ async def compose(analysis: AnalysisResult, modules: list[ModulePick], llm: LLMP
         try:
             markdown = await llm.complete(prompt)
         except Exception:  # noqa: BLE001 — fall back to deterministic report
-            pass
+            _log.warning("LLM report composition failed for case %s; using deterministic report",
+                         analysis.case_id, exc_info=True)
 
     return CaseReport(case_id=analysis.case_id, analysis=analysis, modules=modules,
                       report_markdown=markdown)

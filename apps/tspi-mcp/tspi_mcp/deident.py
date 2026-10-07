@@ -26,18 +26,30 @@ FORBIDDEN_FIELDS = {
 }
 
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-_PHONE = re.compile(r"(?<!\d)(?:\+?\d[\d\s().-]{7,}\d)(?!\d)")
-_LONG_ID = re.compile(r"\b\d{7,}\b")                      # long digit runs (MRN / national id)
-_DOB = re.compile(r"\b(?:19|20)\d{2}[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])\b"
-                  r"|\b(?:0?[1-9]|[12]\d|3[01])[-/.](?:0?[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b")
+_PHONE = re.compile(r"(?<![\d.])(?:\+?\d[\d\s().-]{7,}\d)(?![\d.])")
+# long digit runs (MRN / national id); not preceded/followed by '.' so float fractions don't match
+_LONG_ID = re.compile(r"(?<![\d.])\d{7,}(?![\d.])")
+# a standalone decimal number (one dot between digit runs), e.g. 0.0833333 or 3.9 — never a phone
+_DECIMAL = re.compile(r"(?<![\d.])\d+\.\d+(?![\d.])")
 _NAME_HINT = re.compile(r"\b(?:name|patient|mr|mrs|ms|dr)[.:]\s+[A-Z][a-z]+", re.IGNORECASE)
 
+
+def _looks_like_phone(m: str) -> bool:
+    """Lab values, ranges ("3.9 - 6.1") and long floats match the raw phone pattern but are not
+    phones. Mirrors the engine's app/deid.py so both layers agree."""
+    digits = sum(c.isdigit() for c in m)
+    if not 9 <= digits <= 15:            # E.164 max 15; real local numbers (IN/TH) have >= 9
+        return False
+    return not _DECIMAL.search(m)        # contains a decimal number -> measurement, not a phone
+
+
+# No date pattern: lab/collection dates are legitimate clinical data (removed to match the engine).
+# Explicit DOB fields are still rejected via FORBIDDEN_FIELDS.
 _REDACTIONS = (
-    ("email", _EMAIL),
-    ("date_of_birth", _DOB),     # before phone: a date like 1980-05-01 must not be read as a phone
-    ("phone", _PHONE),
-    ("identifier", _LONG_ID),
-    ("name", _NAME_HINT),
+    ("email", _EMAIL, None),
+    ("phone", _PHONE, _looks_like_phone),
+    ("identifier", _LONG_ID, None),
+    ("name", _NAME_HINT, None),
 )
 
 
@@ -48,10 +60,19 @@ class PIIError(ValueError):
 def _scrub_text(text: str) -> tuple[str, list[str]]:
     findings: list[str] = []
     out = text
-    for label, rx in _REDACTIONS:
-        if rx.search(out):
+    for label, rx, accept in _REDACTIONS:
+        hit = False
+
+        def _repl(mo, label=label, accept=accept):
+            nonlocal hit
+            if accept and not accept(mo.group(0)):
+                return mo.group(0)
+            hit = True
+            return f"[REDACTED_{label.upper()}]"
+
+        out = rx.sub(_repl, out)
+        if hit:
             findings.append(label)
-            out = rx.sub(f"[REDACTED_{label.upper()}]", out)
     return out, findings
 
 
@@ -102,6 +123,6 @@ def deidentify(payload: dict, *, strict: bool) -> tuple[dict, list[str]]:
         raise PIIError(
             "Possible patient identifiers detected in the input "
             f"({', '.join(findings)}). Remove them and resend — TSPI must never receive PII. "
-            "Use a case code instead of any name/date/number that could identify the patient."
+            "Use a case code instead of any name/number that could identify the patient."
         )
     return clean, findings

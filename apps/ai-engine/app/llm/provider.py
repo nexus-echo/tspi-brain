@@ -11,6 +11,10 @@ import httpx
 
 from app.config import settings
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 
 class LLMProvider:
     def __init__(self) -> None:
@@ -50,6 +54,7 @@ class LLMProvider:
                 if provider == "ollama":
                     return await self._ollama(prompt)
             except Exception as e:  # noqa: BLE001 — try the next provider
+                _log.warning("LLM provider %r failed; trying next", provider, exc_info=True)
                 last_err = e
         if last_err:
             raise last_err

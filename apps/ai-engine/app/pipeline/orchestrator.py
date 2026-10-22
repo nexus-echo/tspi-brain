@@ -75,40 +75,51 @@ async def analyze(patient: PatientInput) -> AnalysisResult:
     )
 
 
-async def build_report(patient: PatientInput, report_language: str | None = None) -> CaseReport:
-    analysis = await analyze(patient)
+# ----------------------------------------------------------------------------- shared stages
+# The one-shot build_report() and the clinician step-by-step workflow (app/workflow.py) call the
+# SAME stage functions below, so both paths produce identical clinical logic.
+
+def plan_modules(analysis: AnalysisResult, patient: PatientInput,
+                 axis_scores: list | None = None) -> tuple[list, list, dict]:
+    """Stage: module matching + selection + sequencing. `axis_scores` lets a clinician-adjusted
+    axis set drive matching (default: the engine's analysis). Red-flag gate respected."""
     screen = analysis.red_flag_screen or {}
+    if not screen.get("module_plan_allowed", True):
+        return [], [], {"note": "module plan blocked by red-flag screening", "counts": {"selected": 0}}
+    matched = module_matcher.match(analysis.axis_scores if axis_scores is None else axis_scores,
+                                   _repo, patient.medications, conditions=patient.conditions,
+                                   step_position=analysis.nine_step_position)
+    return sequencer.sequence(matched["selected"]), matched["considered"], matched["selection"]
 
-    # Phase 7 gate: an emergency red flag blocks the module plan entirely.
-    considered: list = []
-    selection: dict = {}
-    if screen.get("module_plan_allowed", True):
-        matched = module_matcher.match(analysis.axis_scores, _repo, patient.medications,
-                                       conditions=patient.conditions,
-                                       step_position=analysis.nine_step_position)
-        modules = sequencer.sequence(matched["selected"])
-        considered = matched["considered"]
-        selection = matched["selection"]
-    else:
-        modules = []
-        selection = {"note": "module plan blocked by red-flag screening",
-                     "counts": {"selected": 0}}
 
-    # Phase 10 dosing safeguard (expert Q3): NSS guides the DEFAULT dose only. It must never
-    # override module-specific rules (e.g. the bowel group), contraindications, organ impairment,
-    # age adjustments or physician judgment.
-    level = dosing.level_for_nss(analysis.nss)
-    level_dose = dosing.dose_string(level)
+def apply_default_doses(modules: list, nss: int) -> list:
+    """Stage: default dosing.
+    Phase 10 dosing safeguard (expert Q3): NSS guides the DEFAULT dose only. It must never
+    override module-specific rules (e.g. the bowel group), contraindications, organ impairment,
+    age adjustments or physician judgment."""
+    level_dose = dosing.dose_string(dosing.level_for_nss(nss))
     for m in modules:
         if m.dose_type == "bowel" or dosing.is_bowel(m.module_code) or dosing.is_bowel(m.module_name or ""):
             m.dose = dosing.bowel_dose(m.module_name or m.module_code)
         else:
             m.dose = level_dose
+    return modules
 
-    # Phase 3 — safety flags (never drop a module; flag for clinician)
-    # Safety flags cover the SELECTED plan AND the considered alternatives: a clinician may
-    # override-select a considered module, so a contraindication must never be hidden by ranking.
-    alerts = safety.check_modules(modules + considered, patient.medications, patient.conditions)
+
+def safety_alerts(modules: list, considered: list, patient: PatientInput) -> list[dict]:
+    """Stage: safety flags (never drop a module; flag for clinician). Covers the SELECTED plan AND
+    the considered alternatives: a clinician may override-select a considered module, so a
+    contraindication must never be hidden by ranking."""
+    return safety.check_modules(modules + considered, patient.medications, patient.conditions)
+
+
+async def finalize_report(patient: PatientInput, analysis: AnalysisResult, modules: list,
+                          considered: list, selection: dict,
+                          report_language: str | None = None,
+                          workflow: dict | None = None) -> CaseReport:
+    """Stage: safety -> compose -> gate/networks/pilot -> persist as a draft. Doses already set."""
+    screen = analysis.red_flag_screen or {}
+    alerts = safety_alerts(modules, considered, patient)
 
     report = await report_composer.compose(analysis, modules, _llm)
     report.monitoring = [{"reassess_every_days": dosing.reassessment_days()}]
@@ -136,12 +147,7 @@ async def build_report(patient: PatientInput, report_language: str | None = None
                             "release_block": report.release_block})
 
     # Candidate network layer — mechanistic context for the assessed axes (explains, never ranks)
-    from app import networks as _net
-    seen_ax: list[str] = []
-    for a in analysis.axis_scores:
-        if getattr(a, "scoring_effect", True) and a.axis_code not in seen_ax:
-            seen_ax.append(a.axis_code)
-    report.networks = [n for ax in seen_ax[:6] for n in _net.networks_for_axis(ax, limit=2)]
+    report.networks = candidate_networks(analysis)
 
     # Production pilot — stamp provisional watermark + language; provisional never auto-reaches a patient
     from app import pilot
@@ -156,6 +162,9 @@ async def build_report(patient: PatientInput, report_language: str | None = None
             if pilot.PILOT_NOTICE[:5] not in " ".join(m.match_notes):
                 m.match_notes = [*m.match_notes, "PROVISIONAL — pilot candidate mapping"]
 
+    if workflow:
+        report.workflow = workflow
+
     # Phase 3 — persist (de-identified) + doctor-validation gate
     status = "draft" if settings.require_doctor_validation else "validated"
     report.status = status
@@ -165,5 +174,22 @@ async def build_report(patient: PatientInput, report_language: str | None = None
         report.model_dump(mode="json"), alerts)
     store.audit("report", case_id=analysis.case_id, report_id=report.report_id,
                 detail={"nss": analysis.nss, "level": analysis.severity_level,
-                        "safety_alerts": len(alerts)})
+                        "safety_alerts": len(alerts), "stepwise": bool(workflow)})
     return report
+
+
+def candidate_networks(analysis: AnalysisResult) -> list[dict]:
+    from app import networks as _net
+    seen_ax: list[str] = []
+    for a in analysis.axis_scores:
+        if getattr(a, "scoring_effect", True) and a.axis_code not in seen_ax:
+            seen_ax.append(a.axis_code)
+    return [n for ax in seen_ax[:6] for n in _net.networks_for_axis(ax, limit=2)]
+
+
+async def build_report(patient: PatientInput, report_language: str | None = None) -> CaseReport:
+    """One-shot plan (REST /report — patients, staff, MiHealth, portal)."""
+    analysis = await analyze(patient)
+    modules, considered, selection = plan_modules(analysis, patient)
+    apply_default_doses(modules, analysis.nss)
+    return await finalize_report(patient, analysis, modules, considered, selection, report_language)

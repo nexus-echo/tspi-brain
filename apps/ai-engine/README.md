@@ -119,6 +119,27 @@ module list), and an automated re-embed-on-change job._
 **Governance:** de-identified output (case_id + age band + sex only); every cited module must
 resolve to the catalog or be flagged; outputs carry a "for clinician review" disclaimer.
 
+## Clinician step-by-step plans — `/plan-sessions`
+Clinicians build a plan one **verified** step at a time instead of the one-shot `/report`. Each step
+returns the engine's result plus **checks**; the clinician must **confirm** it (acknowledging every
+check marked `requires_ack`), **adjust** it (reason-coded), or **go back** before the next step is
+computed. Both paths call the same pipeline stages (`orchestrator.plan_modules`,
+`apply_default_doses`, `finalize_report`), so an unadjusted session gives the same plan as `/report`.
+
+| # | Step | Verifies | Adjustments |
+|---|---|---|---|
+| 1 | `intake` | labs used / not recognised / not used, missing units, symptoms recognised, consent | corrected `case` |
+| 2 | `red_flags` | red flags & critical values (must be acknowledged), plan block | — (go back to intake) |
+| 3 | `analysis` | 39 axes, NSS + level, root cause, networks; low-confidence & hypothesis axes | `exclude_axis`, `include_axis` (module matching only) |
+| 4 | `modules` | selected / considered with reasons, safety outcomes & alerts, selection limits | `remove_module`, `add_module` |
+| 5 | `dosing` | default dose per module (NSS level / KS protocol), safety alerts | `change_dose` |
+
+Confirming `dosing` composes and saves a normal **draft** report (`payload.workflow` holds who confirmed,
+acknowledged and adjusted what) — it still needs `/validate`. Endpoints: `POST /plan-sessions`,
+`GET /plan-sessions/{id}`, `POST /plan-sessions/{id}/confirm|adjust|back|cancel`. Roles: clinician
+(own sessions), reviewer, service; patients and clinic staff get 403 and keep `/report`.
+Storage: `plan_sessions` table (migration `0006_plan_sessions`). Code: `app/workflow.py`.
+
 ## Knowledge Q&A — `POST /ask` (AI Brain answers questions)
 Ask about a **treatment plan** and/or the **TSPI knowledge base**; the brain retrieves the relevant
 knowledge and writes a grounded answer that cites `[S#]` sources and `[PLAN]`.

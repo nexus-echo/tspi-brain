@@ -56,10 +56,26 @@ def is_clinical(role: str | None) -> bool:
 
 
 # --------------------------------------------------------------------------- prompts
-def generate_prompt(case_id: str | None) -> str:
+def generate_prompt(case_id: str | None, role: str | None = None) -> str:
     case = f" for case {case_id}" if case_id else ""
+    if is_clinical(role):
+        return (f"Start the step-by-step TSPI treatment plan{case} using the case details already "
+                "given in this conversation.")
     return (f"Generate the TSPI report{case} using the case details already given in this "
             "conversation.")
+
+
+def step_confirm_prompt(session_id: str, step: str, title: str, acks: list[str]) -> str:
+    ack = (f" I have reviewed and acknowledge: {', '.join(acks)}." if acks else "")
+    return f"Confirm step '{step}' ({title}) of plan session {session_id} and continue.{ack}"
+
+
+def step_adjust_prompt(session_id: str, step: str, title: str) -> str:
+    return f"I want to adjust step '{step}' ({title}) of plan session {session_id}."
+
+
+def step_back_prompt(session_id: str, to_step: str) -> str:
+    return f"Go back to step '{to_step}' of plan session {session_id}."
 
 
 def download_prompt(report_id: str) -> str:
@@ -87,6 +103,7 @@ body{font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,san
 .b-bad{background:var(--badbg);color:var(--bad)}
 .note{color:var(--muted);font-size:13px;margin:4px 0 10px}
 .alert{background:var(--badbg);color:var(--bad);border-radius:8px;padding:8px 10px;font-size:13px;margin:4px 0 10px}
+.note+.note{margin-top:-4px}
 .row{display:flex;gap:8px;flex-wrap:wrap}
 button{font:inherit;font-weight:600;border-radius:8px;padding:7px 14px;cursor:pointer;border:1px solid transparent}
 .primary{background:var(--blue);color:#fff}.secondary{background:transparent;color:var(--blue);border-color:var(--blue)}
@@ -148,23 +165,64 @@ def screen_panel(case_id: str | None, red_flags: list | None, role: str | None) 
                          "else.</div>")
         body = (head + f'<div class="alert"><b>{len(flags)} red flag(s) found.</b> Act on them '
                 "through your clinical protocols before continuing.</div>"
-                '<div class="row">' + _button("Generate report anyway", generate_prompt(case_id),
+                '<div class="row">' + _button(_gen_label(role) + " anyway", generate_prompt(case_id, role),
                                               "secondary") + "</div>")
         return _page(body)
     body = (head + '<div class="note">No red flags found. You can generate the TSPI report.</div>'
-            '<div class="row">' + _button("Generate report", generate_prompt(case_id), "primary")
+            '<div class="row">' + _button(_gen_label(role), generate_prompt(case_id, role), "primary")
             + "</div>")
     return _page(body)
 
 
-def analysis_panel(case_id: str | None) -> str:
+def step_panel(view: dict, role: str | None) -> str | None:
+    """Clinician plan session: one panel per step with Confirm & continue / Adjust / Go back."""
+    if not is_clinical(role):
+        return None
+    sid = view.get("session_id")
+    if view.get("current_step") == "completed":
+        return report_panel(view.get("report_id"), "draft", False, role)
+    st = view.get("step") or {}
+    if not st:
+        return None
+    sev = {"critical": "alert", "blocking": "alert"}
+    checks = st.get("checks") or []
+    items = "".join(
+        f'<div class="{sev.get(c["severity"], "note")}">{"⚠ " if c.get("requires_ack") else ""}'
+        f'{_esc(c["message"])}</div>'
+        for c in checks if c["severity"] != "info")
+    dots = " ".join(("●" if x["status"] == "confirmed" else "◉" if x["step"] == st["step"] else "○")
+                    for x in view.get("steps", []))
+    buttons = []
+    if st.get("can_confirm"):
+        label = "Confirm & generate draft plan" if st.get("next_step") == "generate_draft_plan" else "Confirm & continue"
+        if st.get("acknowledgements_required"):
+            label = label.replace("Confirm", "Acknowledge & confirm", 1)
+        buttons.append(_button(label, step_confirm_prompt(sid, st["step"], st["title"],
+                                                           st.get("acknowledgements_required", [])), "primary"))
+    if st.get("adjust_actions"):
+        buttons.append(_button("Adjust…", step_adjust_prompt(sid, st["step"], st["title"]), "secondary"))
+    if st.get("can_go_back_to"):
+        buttons.append(_button("Go back", step_back_prompt(sid, st["can_go_back_to"][-1]), "ghost"))
+    body = ('<div class="head"><span class="title">'
+            f'Step {_esc(st.get("number"))} of {_esc(view.get("total_steps"))} — {_esc(st.get("title"))}</span>'
+            f'<span class="id">{_esc(dots)}</span><span class="badge b-draft">Needs your confirmation</span></div>'
+            f'<div class="note">{_esc(st.get("summary"))}</div>{items}'
+            f'<div class="row">{"".join(buttons)}</div>')
+    return _page(body)
+
+
+def analysis_panel(case_id: str | None, role: str | None = None) -> str:
     """After tspi_analyze_case."""
     body = ('<div class="head"><span class="title">Analysis complete</span>'
             f'<span class="id">{_esc(case_id)}</span></div>'
             '<div class="note">Create the full TSPI report with the module plan.</div>'
-            '<div class="row">' + _button("Generate report", generate_prompt(case_id), "primary")
+            '<div class="row">' + _button(_gen_label(role), generate_prompt(case_id, role), "primary")
             + "</div>")
     return _page(body)
+
+
+def _gen_label(role: str | None) -> str:
+    return "Start step-by-step plan" if is_clinical(role) else "Generate report"
 
 
 def report_panel(report_id: str | None, status: str | None, deliverable: bool,

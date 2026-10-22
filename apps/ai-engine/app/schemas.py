@@ -220,6 +220,7 @@ class CaseReport(BaseModel):
     pilot_notice: str | None = None           # watermark shown on the report
     report_language: str = "en"               # "en" | "th"
     networks: list[dict] = []                 # candidate mechanistic networks for the assessed axes
+    workflow: dict = {}                       # clinician step-by-step trail (plan sessions), if any
 
 
 class ValidationRequest(BaseModel):
@@ -325,3 +326,43 @@ class AskResponse(BaseModel):
     notice: str | None = None
     retrieval: dict = {}
     disclaimer: str
+
+
+# --------------------------------------------------------------------------- clinician plan sessions
+_REASON = Literal["NEW_CLINICAL_INFORMATION", "PATIENT_PREFERENCE", "SAFETY_CONCERN", "REGISTRY_ERROR",
+                  "ALGORITHM_ERROR", "CLINICAL_JUDGMENT", "DIAGNOSTIC_UNCERTAINTY", "TREATMENT_RESPONSE"]
+PlanStep = Literal["intake", "red_flags", "analysis", "modules", "dosing"]
+
+
+class PlanSessionStart(BaseModel):
+    patient: PatientInput
+    report_language: str | None = None
+
+
+class PlanAdjustAction(BaseModel):
+    """One structured, reason-coded clinician adjustment to the CURRENT step.
+    analysis: exclude_axis | include_axis (axis_code) · modules: remove_module | add_module
+    (module_code) · dosing: change_dose (module_code, new_dose)."""
+    action: Literal["exclude_axis", "include_axis", "remove_module", "add_module", "change_dose"]
+    axis_code: str | None = None
+    module_code: str | None = None
+    new_dose: str | None = None
+    reason_code: _REASON
+    rationale: str | None = Field(default=None, max_length=1000)
+
+
+class PlanStepConfirm(BaseModel):
+    step: PlanStep
+    acknowledge: list[str] = Field(default_factory=list,
+                                   description="Codes of every check that requires acknowledgement.")
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class PlanStepAdjust(BaseModel):
+    step: PlanStep
+    actions: list[PlanAdjustAction] = Field(default_factory=list)
+    case: PatientInput | None = Field(default=None, description="intake only: the corrected case.")
+
+
+class PlanStepBack(BaseModel):
+    to_step: PlanStep

@@ -137,6 +137,23 @@ class Report(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class PlanSession(Base):
+    """Clinician step-by-step plan workflow (intake -> red flags -> analysis -> modules -> dosing
+    -> draft report). `state` holds the de-identified case, each step's result/checks, clinician
+    confirmations and adjustments; the finished draft is a normal Report (report_id)."""
+    __tablename__ = "plan_sessions"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    case_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="active")      # active|completed|cancelled
+    current_step: Mapped[str] = mapped_column(String(24), default="intake")
+    state: Mapped[dict] = mapped_column(JSON)
+    owner_clinician_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    clinic_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    report_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class ReportValidation(Base):
     __tablename__ = "report_validations"
     id: Mapped[int] = mapped_column(primary_key=True)

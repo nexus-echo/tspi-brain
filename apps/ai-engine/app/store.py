@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 
 from app.knowledge.db import get_session, init_db
-from app.knowledge.models import AuditLog, OutcomeRow, Report, ReportValidation
+from app.knowledge.models import AuditLog, OutcomeRow, PlanSession, Report, ReportValidation
 
 
 def new_id() -> str:
@@ -78,6 +78,60 @@ def get_report(report_id: str) -> dict | None:
                 "owner_case_subject": getattr(r, "owner_case_subject", None),
                 "clinic_id": getattr(r, "clinic_id", None),
                 "deliverable": r.status == "validated"}
+    finally:
+        s.close()
+
+
+# ----------------------------------------------------------------------------- plan sessions
+def create_plan_session(case_id: str, state: dict, current_step: str, *,
+                        owner_clinician_id: str | None, clinic_id: str | None) -> str:
+    init_db()
+    sid = new_id()
+    s = get_session()
+    try:
+        s.add(PlanSession(id=sid, case_id=case_id, status="active", current_step=current_step,
+                          state=state, owner_clinician_id=owner_clinician_id, clinic_id=clinic_id))
+        s.commit()
+    finally:
+        s.close()
+    return sid
+
+
+def get_plan_session(session_id: str) -> dict | None:
+    s = get_session()
+    try:
+        r = s.get(PlanSession, session_id)
+        if not r:
+            return None
+        return {"id": r.id, "case_id": r.case_id, "status": r.status,
+                "current_step": r.current_step, "state": r.state,
+                "owner_clinician_id": r.owner_clinician_id, "clinic_id": r.clinic_id,
+                "report_id": r.report_id, "deliverable": False,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None}
+    finally:
+        s.close()
+
+
+def save_plan_session(session_id: str, *, state: dict, current_step: str, status: str,
+                      report_id: str | None = None) -> None:
+    s = get_session()
+    try:
+        r = s.get(PlanSession, session_id)
+        if not r:
+            return
+        r.state = state
+        r.current_step = current_step
+        r.status = status
+        if report_id:
+            r.report_id = report_id
+        r.updated_at = _now()
+        try:
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(r, "state")
+        except Exception:  # noqa: BLE001
+            pass
+        s.commit()
     finally:
         s.close()
 

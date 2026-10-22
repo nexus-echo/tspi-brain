@@ -35,6 +35,13 @@ RULES FOR THE ASSISTANT:
 - The TSPI engine is the sole source of clinical conclusions. Present its structured output as-is.
   Do NOT invent or estimate axis scores, networks, modules, doses, evidence grades, or outcomes.
 - Always run tspi_screen_red_flags first for a new case.
+- CLINICIANS/REVIEWERS build plans STEP BY STEP (plan session): tspi_plan_start, then for each step
+  show the step's summary, result and checks, and WAIT for the clinician to confirm
+  (tspi_plan_confirm_step), adjust (tspi_plan_adjust_step) or go back (tspi_plan_go_back). Never
+  confirm a step or acknowledge a check on your own initiative; only acknowledge the check codes the
+  clinician has reviewed in this conversation. Steps: 1 case data check, 2 red flags, 3 axes/NSS/
+  networks, 4 modules, 5 dosing; confirming step 5 generates the draft plan.
+  Patients and clinic staff keep the one-shot tspi_generate_treatment_plan.
 - A generated treatment plan is an AI DRAFT pending physician review; it is NOT for patient use
   until a clinician approves it with tspi_approve_treatment_plan.
 - If tspi_whoami returns role 'patient' (self-service user), the patient may see their own draft,
@@ -202,7 +209,7 @@ async def tspi_analyze_case(case: PatientCase) -> dict:
     out = {"analysis": result}
     if findings:
         out["deidentification_warning"] = f"Redacted possible identifiers: {', '.join(findings)}"
-    return ui.with_panel(out, ui.analysis_panel(case.case_id), f"analysis/{case.case_id}")
+    return ui.with_panel(out, ui.analysis_panel(case.case_id, _role()), f"analysis/{case.case_id}")
 
 
 @mcp.tool()
@@ -214,6 +221,9 @@ async def tspi_generate_treatment_plan(case: PatientCase) -> dict:
         payload, findings = _forwardable(_to_engine_payload(case))
     except PIIError as e:
         return {"error": str(e), "action_required": "Remove patient identifiers and resend."}
+    if ui.is_clinical(_role()):
+        # Clinicians build plans step by step: start a plan session instead of a one-shot plan.
+        return await _start_session(payload, findings, redirected=True)
     try:
         report = await engine.post("/report", json=payload)
     except engine.EngineError as e:
@@ -309,6 +319,148 @@ async def tspi_record_outcome(report_id: str, marker: str, baseline: float, foll
     body = {"report_id": report_id, "marker": marker, "baseline": baseline, "followup": followup}
     try:
         return await engine.post("/outcome", json=body)
+    except engine.EngineError as e:
+        return {"error": str(e)}
+
+
+# --------------------------------------------------------------------------- clinician plan sessions
+PlanStepName = Literal["intake", "red_flags", "analysis", "modules", "dosing"]
+
+_STEP_GUIDE = ("Show the clinician this step's summary, the key results and every check (verbatim), then "
+               "ask them to confirm, adjust or go back. Do NOT confirm or acknowledge checks yourself.")
+_NOT_CLINICAL = {"error": "Step-by-step plans are for clinicians and reviewers.",
+                 "action_required": "Use tspi_generate_treatment_plan for a self-service draft report."}
+
+
+def _session_out(view: dict, extra: dict | None = None):
+    out = dict(view)
+    if view.get("current_step") == "completed":
+        out["next_step"] = ("The DRAFT plan was generated (report_id). Review it with tspi_get_treatment_plan; "
+                            "approve, edit or reject it with tspi_approve_treatment_plan / tspi_update_treatment_plan.")
+    else:
+        out["assistant_guidance"] = _STEP_GUIDE
+    if extra:
+        out.update(extra)
+    return ui.with_panel(out, ui.step_panel(view, _role()),
+                         f"plan/{view.get('session_id')}/{view.get('current_step')}")
+
+
+async def _start_session(payload: dict, findings: list[str], redirected: bool = False):
+    try:
+        view = await engine.post("/plan-sessions", json={"patient": payload})
+    except engine.EngineError as e:
+        return {"error": str(e)}
+    extra = {}
+    if redirected:
+        extra["note"] = ("For clinicians the plan is built step by step: a plan session was started "
+                         "instead of a one-shot plan. Step 1 of 5 is below.")
+    if findings:
+        extra["deidentification_warning"] = f"Redacted possible identifiers: {', '.join(findings)}"
+    return _session_out(view, extra)
+
+
+class PlanAdjustmentIn(BaseModel):
+    """One reason-coded adjustment to the CURRENT step."""
+    action: Literal["exclude_axis", "include_axis", "remove_module", "add_module", "change_dose"] = Field(
+        description="analysis step: exclude_axis | include_axis · modules step: remove_module | add_module "
+                    "· dosing step: change_dose")
+    axis_code: str | None = Field(default=None, description="For axis actions, e.g. 'A5'.")
+    module_code: str | None = Field(default=None, description="For module/dose actions, e.g. 'H-003'.")
+    new_dose: str | None = Field(default=None, description="For change_dose, e.g. '2 caps x 2/day'.")
+    reason_code: Literal["NEW_CLINICAL_INFORMATION", "PATIENT_PREFERENCE", "SAFETY_CONCERN", "REGISTRY_ERROR",
+                         "ALGORITHM_ERROR", "CLINICAL_JUDGMENT", "DIAGNOSTIC_UNCERTAINTY", "TREATMENT_RESPONSE"]
+    rationale: str | None = Field(default=None, description="Short justification in the clinician's words.")
+
+
+@mcp.tool()
+async def tspi_plan_start(case: PatientCase) -> dict:
+    """CLINICIANS: start a step-by-step treatment plan for a de-identified case. Returns step 1 of 5
+    (case data check: which labs the engine will use, symptoms recognised) with its checks. Each step
+    must be confirmed by the clinician before the engine computes the next one. Run
+    tspi_screen_red_flags first for a new case, as always."""
+    if not ui.is_clinical(_role()):
+        return _NOT_CLINICAL
+    try:
+        payload, findings = _forwardable(_to_engine_payload(case))
+    except PIIError as e:
+        return {"error": str(e), "action_required": "Remove patient identifiers and resend."}
+    return await _start_session(payload, findings)
+
+
+@mcp.tool()
+async def tspi_plan_get(session_id: str) -> dict:
+    """CLINICIANS: show the current step of a plan session (to resume or re-display it)."""
+    if not ui.is_clinical(_role()):
+        return _NOT_CLINICAL
+    try:
+        return _session_out(await engine.get(f"/plan-sessions/{session_id}"))
+    except engine.EngineError as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def tspi_plan_confirm_step(
+    session_id: str,
+    step: PlanStepName = Field(description="The CURRENT step being confirmed."),
+    acknowledge: list[str] | None = Field(default=None, description=(
+        "Codes of the checks the CLINICIAN has reviewed and accepted (the step's "
+        "acknowledgements_required). Only include codes the clinician has seen.")),
+    note: str | None = Field(default=None, description="Optional clinician note / justification."),
+) -> dict:
+    """CLINICIANS: confirm the current step after the clinician has reviewed it. The engine verifies
+    that every required check is acknowledged, then computes and returns the next step. Confirming the
+    last step (dosing) generates the DRAFT plan, which still needs approval. Call ONLY when the
+    clinician explicitly confirmed this step in the conversation (or with the Confirm button)."""
+    if not ui.is_clinical(_role()):
+        return _NOT_CLINICAL
+    body = {"step": step, "acknowledge": list(acknowledge or []), "note": note}
+    try:
+        return _session_out(await engine.post(f"/plan-sessions/{session_id}/confirm", json=body))
+    except engine.EngineError as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def tspi_plan_adjust_step(
+    session_id: str,
+    step: PlanStepName = Field(description="The CURRENT step being adjusted."),
+    adjustments: list[PlanAdjustmentIn] | None = Field(default=None, description=(
+        "Reason-coded changes for the analysis, modules or dosing step.")),
+    case: PatientCase | None = Field(default=None, description=(
+        "intake step only: the corrected de-identified case (same case_id).")),
+) -> dict:
+    """CLINICIANS: apply the clinician's changes to the CURRENT step, then show the re-verified step
+    for confirmation. intake: corrected case data · analysis: exclude/include an axis for module
+    matching · modules: remove/add a module · dosing: change a module's dose. Confirm the changes with
+    the clinician (table: action, target, new value, reason code) before calling."""
+    if not ui.is_clinical(_role()):
+        return _NOT_CLINICAL
+    body: dict[str, Any] = {"step": step, "actions": [a.model_dump() for a in (adjustments or [])]}
+    findings: list[str] = []
+    if case is not None:
+        try:
+            body["case"], findings = _forwardable(_to_engine_payload(case))
+        except PIIError as e:
+            return {"error": str(e), "action_required": "Remove patient identifiers and resend."}
+    try:
+        view = await engine.post(f"/plan-sessions/{session_id}/adjust", json=body)
+    except engine.EngineError as e:
+        return {"error": str(e)}
+    return _session_out(view, {"deidentification_warning": f"Redacted possible identifiers: {', '.join(findings)}"}
+                        if findings else None)
+
+
+@mcp.tool()
+async def tspi_plan_go_back(
+    session_id: str,
+    to_step: PlanStepName = Field(description="An earlier step to re-open."),
+) -> dict:
+    """CLINICIANS: re-open an earlier step of a plan session as it was. Every later step is cleared and
+    recomputed when the clinician confirms again (adjustments made in later steps are discarded)."""
+    if not ui.is_clinical(_role()):
+        return _NOT_CLINICAL
+    try:
+        return _session_out(await engine.post(f"/plan-sessions/{session_id}/back", json={"to_step": to_step}))
     except engine.EngineError as e:
         return {"error": str(e)}
 

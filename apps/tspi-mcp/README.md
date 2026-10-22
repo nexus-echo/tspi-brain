@@ -27,6 +27,11 @@ Doctor ─chat─► AI client ─MCP─► THIS server ─REST─► TSPI FastA
 | `tspi_approve_treatment_plan` | `POST /validate` | Physician approve / edit / reject |
 | `tspi_update_treatment_plan` | `POST /reports/{id}/override` | Structured physician edits (remove/reject module, change dose, override safety, add/remove secondary axis, note) — non-destructive; resets plan to draft for re-approval |
 | `tspi_record_outcome` | `POST /outcome` | Follow-up marker for propose-only learning |
+| `tspi_plan_start` | `POST /plan-sessions` | **Clinicians:** start a step-by-step plan (5 verified steps, each confirmed by the clinician). `tspi_generate_treatment_plan` redirects clinicians here; patients/staff keep the one-shot plan. |
+| `tspi_plan_get` | `GET /plan-sessions/{id}` | Re-show / resume the current step |
+| `tspi_plan_confirm_step` | `POST /plan-sessions/{id}/confirm` | Confirm the current step (acknowledging its checks); confirming step 5 generates the draft plan |
+| `tspi_plan_adjust_step` | `POST /plan-sessions/{id}/adjust` | Reason-coded changes: corrected case (intake), exclude/include axis, remove/add module, change dose |
+| `tspi_plan_go_back` | `POST /plan-sessions/{id}/back` | Re-open an earlier step (later steps are cleared) |
 | `tspi_ask` | `POST /ask` | Ask TSPI Brain about a treatment plan (`report_id` / `case_id`) and/or the knowledge base (axes, domains, keys, modules, products, networks, safety, dosing). Grounded, cited answer; `retrieval_only=true` returns passages only. Question is PII-scanned before it leaves the MCP. |
 
 Later phases add `tspi_extract_lab_report` (`/extract`), remote transport + OAuth, and RBAC.

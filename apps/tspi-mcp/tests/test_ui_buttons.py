@@ -80,14 +80,14 @@ def _prompts(page):
 
 # ------------------------------------------------------------------ gating
 def test_no_panel_without_chat_client(engine, monkeypatch):
-    as_role(monkeypatch, "clinician")
+    as_role(monkeypatch, "patient")
     res = _run(_call("tspi_generate_treatment_plan", {"case": CASE}))
     assert _html(res) is None                      # Claude connector / stdio: plain JSON only
     assert res.structured_content["report_id"] == "R-1"
 
 
 def test_auto_mode_attaches_for_chat_client_id(engine, monkeypatch):
-    as_role(monkeypatch, "clinician")
+    as_role(monkeypatch, "patient")
     monkeypatch.setattr(ui, "settings", dataclasses.replace(
         settings, ui_mode="auto", ui_client_ids=("client_CHAT",)))
     monkeypatch.setattr(ui, "_token_client_id", lambda: "client_CHAT")
@@ -118,17 +118,17 @@ def test_screen_and_analysis_offer_generate(engine, ui_on, monkeypatch):
     for role in ("patient", "clinician"):
         as_role(monkeypatch, role)
         page = _html(_run(_call("tspi_screen_red_flags", {"case": CASE})))
-        assert "Generate report" in page
+        assert ("Start step-by-step plan" if role == "clinician" else "Generate report") in page
         assert "case PT-AB12CD" in _prompts(page)[0]
         page = _html(_run(_call("tspi_analyze_case", {"case": CASE})))
-        assert _prompts(page) == [ui.generate_prompt("PT-AB12CD")]
+        assert _prompts(page) == [ui.generate_prompt("PT-AB12CD", role)]
 
 
 def test_red_flags_block_generate_button_for_patients():
     page = ui.screen_panel("PT-1", [{"flag": "chest pain"}], "patient")
     assert "Urgent" in page and 'data-prompt="' not in page
     page = ui.screen_panel("C-1", [{"flag": "chest pain"}], "clinician")
-    assert "Generate report anyway" in page
+    assert "Start step-by-step plan anyway" in page
 
 
 # ------------------------------------------------------------------ approve

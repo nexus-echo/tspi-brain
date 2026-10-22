@@ -20,6 +20,10 @@ from app.schemas import (
     OutcomeRecord,
     OverrideRequest,
     PatientInput,
+    PlanSessionStart,
+    PlanStepAdjust,
+    PlanStepBack,
+    PlanStepConfirm,
     ValidationRequest,
     ExtractionResult,
 )
@@ -172,6 +176,153 @@ async def validate_endpoint(req: ValidationRequest,
                 detail={"decision": req.decision, "by_name": p.name, "by_email": p.email},
                 **_audit_ctx(p))
     return result
+
+
+# ----------------------------------------------------------------------------- plan sessions
+# Clinician step-by-step plan workflow. The SAME pipeline as /report, one verified step at a time,
+# each confirmed (or adjusted / rolled back) by the clinician. /report stays one-shot for patients,
+# staff, MiHealth and the portal.
+_PLAN_ROLES = ("clinician", "reviewer", "service")
+
+
+def _plan_principal(p: Principal = Depends(get_principal)) -> Principal:
+    if settings.auth_enabled and p.role not in _PLAN_ROLES:
+        raise HTTPException(status_code=403, detail=(
+            "Step-by-step plan sessions are for clinicians and reviewers. Use the standard plan "
+            "generation instead."))
+    return p
+
+
+def _wf_error(e) -> HTTPException:
+    return HTTPException(status_code=e.status, detail={"message": e.message, **e.detail})
+
+
+def _load_session(session_id: str, p: Principal) -> dict:
+    sess = store.get_plan_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Plan session not found.")
+    check_report_access(p, sess, write=True)          # owner clinician / reviewer only
+    if sess["status"] == "cancelled":
+        raise HTTPException(status_code=409, detail="This plan session was cancelled.")
+    return sess
+
+
+def _save_session(sess: dict, state: dict) -> dict:
+    status = "completed" if state.get("current_step") == "completed" else "active"
+    store.save_plan_session(sess["id"], state=state, current_step=state["current_step"],
+                            status=status, report_id=state.get("report_id"))
+    return {**sess, "state": state, "status": status, "current_step": state["current_step"]}
+
+
+@router.post("/plan-sessions", tags=["plan-sessions"])
+async def start_plan_session(req: PlanSessionStart, p: Principal = Depends(_plan_principal)) -> dict:
+    """Start a clinician step-by-step plan for a de-identified case. Returns step 1 (case data
+    check) with its verification checks. Nothing is analysed until the clinician confirms."""
+    from app import workflow
+    _require_consent(req.patient, "ai_analysis")
+    patient = deid.intake(req.patient)
+    actor = _actor(p)
+    state = await workflow.start(patient, req.report_language, actor)
+    sid = store.create_plan_session(
+        patient.case_id, state, state["current_step"],
+        owner_clinician_id=(p.id if p.role in ("clinician", "reviewer") else None), clinic_id=p.clinic_id)
+    store.audit("plan_session_start", case_id=patient.case_id, actor=p.id,
+                detail={"session_id": sid}, **_audit_ctx(p))
+    return workflow.view(store.get_plan_session(sid))
+
+
+@router.get("/plan-sessions/{session_id}", tags=["plan-sessions"])
+async def get_plan_session(session_id: str, p: Principal = Depends(_plan_principal)) -> dict:
+    from app import workflow
+    return workflow.view(_load_session(session_id, p))
+
+
+@router.post("/plan-sessions/{session_id}/confirm", tags=["plan-sessions"])
+async def confirm_plan_step(session_id: str, req: PlanStepConfirm,
+                            p: Principal = Depends(_plan_principal)) -> dict:
+    """Confirm the CURRENT step (acknowledging every check that requires it). The engine then
+    computes and verifies the next step. Confirming the last step (dosing) generates the DRAFT
+    report — it still needs physician approval (POST /validate)."""
+    from app import workflow
+    sess = _load_session(session_id, p)
+    actor = _actor(p)
+
+    async def _finalize(state: dict) -> str:
+        report = await workflow.build_draft(state)
+        store.set_report_owner(report.report_id,
+                               clinician_id=(p.id if p.role in ("clinician", "reviewer") else None),
+                               case_subject=sess["case_id"], clinic_id=p.clinic_id)
+        store.stamp_report_actor(report.report_id, "created_by", actor)
+        store.audit("report", case_id=sess["case_id"], report_id=report.report_id, actor=p.id,
+                    detail={"stepwise": True, "session_id": session_id}, **_audit_ctx(p))
+        return report.report_id
+
+    try:
+        state = await workflow.confirm(sess["state"], req.step, req.acknowledge, req.note, actor, _finalize)
+    except workflow.WorkflowError as e:
+        raise _wf_error(e) from e
+    sess = _save_session(sess, state)
+    store.audit("plan_step_confirm", case_id=sess["case_id"], report_id=state.get("report_id"), actor=p.id,
+                detail={"session_id": session_id, "step": req.step,
+                        "acknowledged": len(req.acknowledge)}, **_audit_ctx(p))
+    return workflow.view(sess)
+
+
+@router.post("/plan-sessions/{session_id}/adjust", tags=["plan-sessions"])
+async def adjust_plan_step(session_id: str, req: PlanStepAdjust,
+                           p: Principal = Depends(_plan_principal)) -> dict:
+    """Apply reason-coded clinician adjustments to the CURRENT step, then re-verify it.
+    intake: send the corrected `case` · analysis: exclude_axis / include_axis · modules:
+    remove_module / add_module · dosing: change_dose. red_flags has no adjustments (go back to
+    intake to correct the data)."""
+    from app import workflow
+    sess = _load_session(session_id, p)
+    case = None
+    if req.case is not None:
+        if req.case.case_id != sess["case_id"]:
+            raise HTTPException(status_code=422, detail="The corrected case must keep the same case_id.")
+        _require_consent(req.case, "ai_analysis")
+        case = deid.intake(req.case)
+    try:
+        state = await workflow.adjust(sess["state"], req.step, [a.model_dump() for a in req.actions],
+                                      case, _actor(p))
+    except workflow.WorkflowError as e:
+        raise _wf_error(e) from e
+    sess = _save_session(sess, state)
+    store.audit("plan_step_adjust", case_id=sess["case_id"], actor=p.id,
+                detail={"session_id": session_id, "step": req.step,
+                        "actions": [a.action for a in req.actions] or (["update_case"] if case else [])},
+                **_audit_ctx(p))
+    return workflow.view(sess)
+
+
+@router.post("/plan-sessions/{session_id}/back", tags=["plan-sessions"])
+async def back_plan_step(session_id: str, req: PlanStepBack,
+                         p: Principal = Depends(_plan_principal)) -> dict:
+    """Re-open an earlier step as it was; every later step is cleared and recomputed on confirm."""
+    from app import workflow
+    sess = _load_session(session_id, p)
+    try:
+        state = await workflow.back(sess["state"], req.to_step, _actor(p))
+    except workflow.WorkflowError as e:
+        raise _wf_error(e) from e
+    sess = _save_session(sess, state)
+    store.audit("plan_step_back", case_id=sess["case_id"], actor=p.id,
+                detail={"session_id": session_id, "to_step": req.to_step}, **_audit_ctx(p))
+    return workflow.view(sess)
+
+
+@router.post("/plan-sessions/{session_id}/cancel", tags=["plan-sessions"])
+async def cancel_plan_session(session_id: str, p: Principal = Depends(_plan_principal)) -> dict:
+    from app import workflow
+    sess = _load_session(session_id, p)
+    if sess["status"] == "completed":
+        raise HTTPException(status_code=409, detail="A completed session cannot be cancelled.")
+    store.save_plan_session(session_id, state=sess["state"], current_step=sess["current_step"],
+                            status="cancelled")
+    store.audit("plan_session_cancel", case_id=sess["case_id"], actor=p.id,
+                detail={"session_id": session_id}, **_audit_ctx(p))
+    return {**workflow.view({**sess, "status": "cancelled"}), "status": "cancelled"}
 
 
 @router.post("/reports/{report_id}/override", tags=["workflow"])

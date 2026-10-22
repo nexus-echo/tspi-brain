@@ -46,7 +46,24 @@ def _headers() -> dict[str, str]:
     return h
 
 
+def _detail(body: str):
+    try:
+        data = _json.loads(body)
+    except ValueError:
+        return None
+    return data.get("detail") if isinstance(data, dict) else None
+
+
 def _explain(status: int, body: str) -> str:
+    detail = _detail(body)
+    if status == 409:
+        # plan-session workflow guidance (e.g. missing acknowledgements, wrong step) — relay as-is
+        if isinstance(detail, dict):
+            extra = {k: v for k, v in detail.items() if k != "message"}
+            return f"{detail.get('message', 'Conflict')}" + (f" Details: {_json.dumps(extra)}" if extra else "")
+        return str(detail or body[:400])
+    if status == 403 and isinstance(detail, str) and "consent" not in detail.lower():
+        return f"The engine refused the request (403): {detail}"
     if status == 403:
         return ("The engine refused the request (403). The most common cause is missing consent: "
                 "set consent_ai_analysis=true after confirming the patient consented.")
@@ -103,7 +120,9 @@ def _log_http_error(method: str, path: str, resp: httpx.Response) -> None:
 async def _request(method: str, path: str, *, json: Any = None,
                    params: dict | None = None) -> Any:
     url = f"{settings.engine_url.rstrip('/')}{path}"
-    timeout = settings.report_timeout_s if path in _SLOW_PATHS else settings.http_timeout_s
+    # confirming the last plan-session step composes the report (LLM) -> long timeout too
+    slow = path in _SLOW_PATHS or (path.startswith("/plan-sessions/") and path.endswith("/confirm"))
+    timeout = settings.report_timeout_s if slow else settings.http_timeout_s
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.request(method, url, json=json, params=params, headers=_headers())

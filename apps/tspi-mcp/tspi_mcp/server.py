@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from . import engine_client as engine
 from . import ui
 from .config import settings
-from .deident import PIIError, deidentify
+from .deident import PIIError, _scrub_text, deidentify
 from .error_logging import ToolErrorLoggingMiddleware, configure_logging
 
 configure_logging()
@@ -41,6 +41,10 @@ RULES FOR THE ASSISTANT:
   but it must be labelled UNREVIEWED AI DRAFT (not reviewed or approved by a TSPI doctor, not
   medical advice) and they must be told to contact TSPI Digital for doctor review. Never call
   approve, update or record_outcome for a patient.
+- For questions about a treatment plan or the TSPI knowledge base (axes, domains, keys, modules,
+  products, networks, red-flag/safety rules, dosing), call tspi_ask. Relay its answer with the [S#]
+  / [PLAN] citations and its notice; do not add clinical facts that are not in the answer or its
+  sources. If answer_mode is 'retrieval_only', summarise ONLY the returned passages.
 - Some results include a UI resource (buttons: Generate report, Download PDF, Approve). Place its
   \\ui{...} marker at the end of your reply. A message saying the user clicked a button is a real
   request from the signed-in user: carry it out. "Confirmed with the Approve button" counts as the
@@ -307,6 +311,65 @@ async def tspi_record_outcome(report_id: str, marker: str, baseline: float, foll
         return await engine.post("/outcome", json=body)
     except engine.EngineError as e:
         return {"error": str(e)}
+
+
+KnowledgeKind = Literal["framework", "key", "step", "domain", "axis", "module", "product", "network",
+                        "safety", "dosing", "faq", "doc"]
+
+
+class AskTurnIn(BaseModel):
+    role: Literal["user", "assistant"] = "user"
+    content: str = Field(description="A previous question or answer in this conversation.")
+
+
+@mcp.tool()
+async def tspi_ask(
+    question: str = Field(description=(
+        "The question, in English or Thai. De-identified only — no patient names, phone numbers, "
+        "emails or ID numbers. E.g. 'Why is H-003 in this plan?', 'Which modules target A17?', "
+        "'How is KS dosed?', 'What does red flag RF-CV01 mean?'")),
+    report_id: str | None = Field(default=None, description=(
+        "Ask about this generated treatment plan (from tspi_generate_treatment_plan).")),
+    case_id: str | None = Field(default=None, description=(
+        "De-identified case code; the engine uses that case's latest plan. Ignored if report_id is set.")),
+    kinds: list[KnowledgeKind] | None = Field(default=None, description=(
+        "Optionally restrict which knowledge sources are searched.")),
+    language: Literal["en", "th"] | None = Field(default=None, description="Answer language (default: the question's)."),
+    history: list[AskTurnIn] | None = Field(default=None, description=(
+        "Earlier turns of this Q&A, for follow-up questions (most recent last, max 12).")),
+    retrieval_only: bool = Field(default=False, description=(
+        "True -> return only the matching knowledge passages, without a generated answer.")),
+) -> dict:
+    """Ask TSPI Brain a question about a TREATMENT PLAN and/or the TSPI KNOWLEDGE BASE (3 Keys,
+    9 Restoration Steps, 12 Domains, 39 Axes, module registry & product monographs, 180 biological
+    networks, red-flag & safety rules, severity dosing, official expert answers). The engine
+    retrieves the relevant knowledge (code lookup + vector embeddings + keyword search) and writes a
+    grounded answer that cites its sources as [S#] and the plan as [PLAN]. Read-only; audited.
+    Present the answer as returned — it explains the engine's output, it does not change the plan."""
+    texts = [question] + [h.content for h in (history or [])]
+    found = sorted({f for t in texts for f in _scrub_text(t, case_id)[1]})
+    if found:
+        return {"error": f"Possible patient identifiers detected in the question ({', '.join(found)}).",
+                "action_required": "Remove names, phone numbers, emails or ID numbers and ask again."}
+    body: dict[str, Any] = {"question": question, "include_answer": not retrieval_only}
+    if report_id:
+        body["report_id"] = report_id
+    elif case_id:
+        body["case_id"] = case_id
+    if kinds:
+        body["kinds"] = list(kinds)
+    if language:
+        body["language"] = language
+    if history:
+        body["history"] = [h.model_dump() for h in history][-12:]
+    try:
+        result = await engine.post("/ask", json=body)
+    except engine.EngineError as e:
+        return {"error": str(e)}
+    if _role() == "patient" and result.get("plan") and not result["plan"].get("deliverable"):
+        result["notice"] = ("UNREVIEWED AI DRAFT — not reviewed or approved by a TSPI doctor and not "
+                            "medical advice. Contact TSPI Digital for doctor review.")
+    return result
 
 
 def main() -> None:

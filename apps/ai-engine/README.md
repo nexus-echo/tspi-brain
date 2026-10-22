@@ -119,6 +119,48 @@ module list), and an automated re-embed-on-change job._
 **Governance:** de-identified output (case_id + age band + sex only); every cited module must
 resolve to the catalog or be flagged; outputs carry a "for clinician review" disclaimer.
 
+## Knowledge Q&A — `POST /ask` (AI Brain answers questions)
+Ask about a **treatment plan** and/or the **TSPI knowledge base**; the brain retrieves the relevant
+knowledge and writes a grounded answer that cites `[S#]` sources and `[PLAN]`.
+
+```bash
+# knowledge-base question
+curl -s localhost:8000/ask -H 'content-type: application/json' \
+  -d '{"question": "Which modules target axis A17, and how is KS dosed?"}'
+# about a generated plan (or pass "case_id" to use that case's latest plan)
+curl -s localhost:8000/ask -H 'content-type: application/json' \
+  -d '{"question": "Why was H-003 selected and what are its cautions?", "report_id": "<report_id>"}'
+# retrieval only (no LLM)
+curl -s 'localhost:8000/knowledge/search?q=critical%20potassium&kinds=safety'
+```
+
+Request: `question` (required) · `report_id` | `case_id` · `kinds` (framework, key, step, domain, axis,
+module, product, network, safety, dosing, faq, doc) · `top_k` · `language` (en|th) · `audience`
+(clinician|patient — defaults from the caller's role) · `history` (prior turns for follow-ups) ·
+`include_answer` (false → retrieval only).
+Response: `answer`, `answer_mode` (`llm_grounded` | `retrieval_only`), `sources[]` (S#, doc_id, kind,
+title, snippet, score, retrieval=exact/vector/lexical, cited), `plan` (status/deliverable), `notice`
+(AI-draft label when the plan is not approved), `retrieval`, `disclaimer`.
+
+How it works
+- `app/knowledge/corpus.py` — one corpus (~880 docs): framework, 3 keys, 9 steps, 12 domains, 39 axes
+  (+ mapped modules/networks, + axis monographs), module registry, product monographs, 180 networks,
+  red-flag & safety rules, severity/KS dosing, official expert answers. Curated docs are read from
+  `KB_DOCS_DIR` (default: `<repo>/knowledge-sources`) **only** via the allow-list `KB_DOCS_GLOBS` — patient
+  samples and chats in that folder are never indexed.
+- `app/knowledge/search.py` — hybrid retrieval fused with RRF: **exact** code/name lookup (A17, D3,
+  H-003, LBN-001, RF-CV01, KEY-B, "KS") + **pgvector** embeddings + in-process **BM25** (Thai bigrams).
+  Works on SQLite (exact + BM25) with no vector store.
+- `app/knowledge/qa.py` — plan context from the stored report (scores, modules, doses, safety alerts,
+  clinician edits, follow-up outcomes; never clinician names/emails), grounded prompt, LLM via the
+  existing provider chain with an `ASK_LLM_BUDGET_S` budget; on failure → retrieval-only answer.
+- Governance: questions are PII-scanned (422 `pii_detected`); plan access follows the same tenant rules
+  as `GET /reports/{id}`; every call is audited (`action=ask`, sources — not the question text).
+
+Embeddings: `python -m scripts.embed_knowledge` now writes the legacy `axis`/`product` rows (unchanged,
+used by the analysis pipeline) **plus** `kb:<kind>` rows for Q&A. Re-run it after changing `data/` or
+the knowledge-sources docs, and restart the engine (the corpus is cached per process).
+
 ## Lab/imaging extraction — `POST /extract` (local-only)
 Reads ONE uploaded report (image / scanned PDF / text PDF) with **local Ollama** models and
 returns candidate labs + imaging narrative (`confirmed=false` — human reviews before it feeds

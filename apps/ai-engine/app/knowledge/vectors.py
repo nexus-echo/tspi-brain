@@ -33,12 +33,16 @@ def create_embeddings_table(eng, dim: int = 384) -> Table:
     return t
 
 
-def search(session, table: Table, query_vec: list[float], kind: str | None = None, k: int = 5) -> list[dict]:
-    """Cosine-distance nearest neighbours. Returns [{kind, ref_code, content, score}]."""
+def search(session, table: Table, query_vec: list[float], kind: str | None = None, k: int = 5,
+           kind_prefix: str | None = None) -> list[dict]:
+    """Cosine-distance nearest neighbours. Returns [{kind, ref_code, content, score}].
+    `kind_prefix` (e.g. 'kb:') selects the Q&A corpus rows written by embed_knowledge."""
     dist = table.c.embedding.cosine_distance(query_vec).label("dist")
     stmt = select(table.c.kind, table.c.ref_code, table.c.content, dist)
     if kind:
         stmt = stmt.where(table.c.kind == kind)
+    if kind_prefix:
+        stmt = stmt.where(table.c.kind.startswith(kind_prefix))
     stmt = stmt.order_by(dist).limit(k)
     rows = session.execute(stmt).all()
     return [{"kind": r.kind, "ref_code": r.ref_code, "content": r.content,

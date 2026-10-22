@@ -14,6 +14,8 @@ from app.pipeline import extraction
 from app.pipeline.orchestrator import analyze, build_report
 from app.schemas import (
     AnalysisResult,
+    AskRequest,
+    AskResponse,
     CaseReport,
     OutcomeRecord,
     OverrideRequest,
@@ -282,10 +284,68 @@ async def temporal_endpoint(case_id: str) -> dict:
 
 @router.get("/knowledge/health", tags=["knowledge"])
 async def knowledge_health() -> dict:
+    from app.knowledge import corpus
+    try:
+        kb = corpus.stats()
+    except Exception:  # noqa: BLE001 — health must never fail on the KB
+        kb = {"documents": 0}
     return {
         "deidentification_enforced": settings.enforce_deidentification,
         "doctor_validation_required": settings.require_doctor_validation,
+        "knowledge_base": kb,
     }
+
+
+_ASK_ROLES = ("patient", "clinic_staff", "clinician", "reviewer", "auditor", "service")
+
+
+@router.post("/ask", response_model=AskResponse, tags=["knowledge"])
+async def ask_endpoint(req: AskRequest,
+                       p: Principal = Depends(require_role(*_ASK_ROLES))) -> AskResponse:
+    """Ask TSPI Brain a question about a treatment plan and/or the TSPI knowledge base
+    (39 axes, 12 domains, 3 keys, modules & products, 180 networks, red-flag/safety rules, dosing,
+    official expert answers). Retrieves the relevant knowledge (exact codes + pgvector embeddings +
+    BM25) and writes a grounded, cited answer. Without an LLM it returns the retrieved passages.
+
+    Plan scope: pass `report_id` (or a `case_id` to use its latest report). Access follows the same
+    tenant rules as GET /reports/{id}. Questions must be de-identified (422 otherwise)."""
+    from app.knowledge import qa
+
+    report, outcomes = None, None
+    if req.report_id or req.case_id:
+        rid = req.report_id or store.latest_report_id_for_case(req.case_id)
+        report = store.get_report(rid) if rid else None
+        if not report:
+            raise HTTPException(status_code=404, detail="No treatment plan found for that report/case.")
+        check_report_access(p, report, write=False)
+        outcomes = store.outcomes_for_case(report["case_id"])
+
+    audience = req.audience or ("patient" if p.role == "patient" else "clinician")
+    result = await qa.answer(req.question, report=report, outcomes=outcomes,
+                             history=[h.model_dump() for h in req.history], kinds=req.kinds,
+                             top_k=req.top_k, language=req.language, audience=audience,
+                             use_llm=req.include_answer)
+    # Audit WHO asked and WHAT was in scope — not the question text.
+    store.audit("ask", case_id=(report or {}).get("case_id"), report_id=(report or {}).get("id"),
+                actor=p.id, detail={"answer_mode": result["answer_mode"],
+                                    "sources": [s["doc_id"] for s in result["sources"]][:20],
+                                    "kinds": req.kinds}, **_audit_ctx(p))
+    return AskResponse(**result)
+
+
+@router.get("/knowledge/search", tags=["knowledge"])
+async def knowledge_search_endpoint(q: str, kinds: str | None = None, k: int = 8,
+                                    p: Principal = Depends(require_role(*_ASK_ROLES))) -> dict:
+    """Retrieval only: the knowledge-base passages that best match `q` (no LLM).
+    `kinds` is a comma-separated filter, e.g. `module,product`."""
+    from app.knowledge import qa
+    from app.knowledge.search import hybrid_search
+    qa.guard_text(q)
+    res = await hybrid_search(q, k=max(1, min(k, 50)),
+                              kinds=[x.strip() for x in kinds.split(",")] if kinds else None)
+    return {"query": q, "vector_used": res["vector_used"], "hits": [
+        {"doc_id": h["id"], "kind": h["kind"], "ref_code": h["ref_code"], "title": h["title"],
+         "content": h["content"], "score": h["score"], "retrieval": h["retrieval"]} for h in res["hits"]]}
 
 
 @router.post("/extract", response_model=ExtractionResult, tags=["extraction"])

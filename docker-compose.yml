@@ -50,6 +50,14 @@ services:
 
     environment:
       DATABASE_URL: postgresql+psycopg://tspi:${TSPI_DB_PASSWORD:-tspi}@tspi-db:5432/tspi
+      KB_DOCS_DIR: /app/knowledge-sources
+
+    # Curated knowledge docs for POST /ask (read-only). Only the allow-listed sub-folders are
+    # mounted — never patient-samples or chat exports.
+    volumes:
+      - ./knowledge-sources/products:/app/knowledge-sources/products:ro
+      - ./knowledge-sources/39-axes/axes:/app/knowledge-sources/39-axes/axes:ro
+      - ./knowledge-sources/new_revised_docs/question_answers.txt:/app/knowledge-sources/new_revised_docs/question_answers.txt:ro
 
     # ports:
     #   - "8000:8000"

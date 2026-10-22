@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     embedding_api_send_dimensions: bool = False  # True for OpenAI; False for providers that don't accept the dimensions param (e.g. OpenRouter)
     ollama_embedding_model: str = "bge-m3"   # local Ollama embed model (multilingual)
 
+    # --- Knowledge Q&A (POST /ask) ---
+    # Root of curated reference docs (product/axis monographs, official expert answers). Unset ->
+    # auto-detect <repo>/knowledge-sources in a checkout. ONLY the allow-listed globs below are read,
+    # so patient samples / chats inside that folder are never indexed.
+    kb_docs_dir: str | None = None
+    kb_docs_globs: str = "products/*.md,39-axes/axes/*.md,new_revised_docs/question_answers.txt"
+    ask_top_k: int = 8                    # knowledge passages given to the answer writer
+    ask_llm_budget_s: float = 120.0       # total LLM time for one answer; past it -> retrieval-only answer
+
     # LLM
     llm_primary: str = "ollama"
     ollama_base_url: str = "http://localhost:11434"

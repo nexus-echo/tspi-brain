@@ -82,6 +82,17 @@ def get_report(report_id: str) -> dict | None:
         s.close()
 
 
+def latest_report_id_for_case(case_id: str) -> str | None:
+    """Most recent report id for a de-identified case code (None if the case has no report)."""
+    s = get_session()
+    try:
+        r = (s.query(Report.id).filter(Report.case_id == case_id)
+             .order_by(Report.created_at.desc()).first())
+        return r[0] if r else None
+    finally:
+        s.close()
+
+
 def save_identity(case_id: str, blob: str, encrypted: bool) -> None:
     """P4 — upsert encrypted patient identity (PHI) keyed by case_id."""
     from app.knowledge.models import PatientIdentity as _PI

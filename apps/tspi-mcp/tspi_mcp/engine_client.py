@@ -17,7 +17,7 @@ from .config import settings
 _log = logging.getLogger("tspi_mcp.engine")
 
 # Endpoints that run the LLM inside the engine -> use the longer report timeout.
-_SLOW_PATHS = {"/report", "/extract"}
+_SLOW_PATHS = {"/report", "/extract", "/ask"}
 
 
 class EngineError(RuntimeError):

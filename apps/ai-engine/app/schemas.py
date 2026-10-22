@@ -279,3 +279,49 @@ class ExtractionResult(BaseModel):
     narrative: str | None = None             # any free-text summary the model produced
     confirmed: bool = False
     notes: str = ""
+
+
+# --------------------------------------------------------------------------- Knowledge Q&A (/ask)
+class AskTurn(BaseModel):
+    role: Literal["user", "assistant"] = "user"
+    content: str = Field(max_length=4000)
+
+
+class AskRequest(BaseModel):
+    """Ask TSPI Brain a question about a treatment plan and/or the TSPI knowledge base.
+    De-identified only: never put names, phone numbers, emails or ID numbers in the question."""
+    question: str = Field(min_length=2, max_length=2000)
+    report_id: str | None = Field(default=None, description="Answer about this stored plan/report.")
+    case_id: str | None = Field(default=None, description="De-identified case code; uses its latest report.")
+    kinds: list[str] | None = Field(default=None, description=(
+        "Restrict knowledge sources: framework, key, step, domain, axis, module, product, network, "
+        "safety, dosing, faq, doc."))
+    top_k: int | None = Field(default=None, ge=1, le=20)
+    language: Literal["en", "th"] | None = None
+    audience: Literal["clinician", "patient"] | None = None
+    history: list[AskTurn] = Field(default_factory=list, max_length=12,
+                                   description="Prior turns for follow-up questions (most recent last).")
+    include_answer: bool = Field(default=True, description="False -> retrieval only (no LLM).")
+
+
+class AskSource(BaseModel):
+    id: str                       # S1..Sn — what the answer cites
+    doc_id: str
+    kind: str
+    ref_code: str
+    title: str
+    snippet: str
+    score: float | None = None
+    retrieval: list[str] = []     # exact | vector | lexical
+    cited: bool = False
+
+
+class AskResponse(BaseModel):
+    question: str
+    answer: str
+    answer_mode: Literal["llm_grounded", "retrieval_only"]
+    sources: list[AskSource] = []
+    plan: dict | None = None
+    notice: str | None = None
+    retrieval: dict = {}
+    disclaimer: str

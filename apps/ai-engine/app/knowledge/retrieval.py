@@ -46,12 +46,12 @@ def _cache_put(key: tuple, vec: list[float]) -> None:
         _CACHE.popitem(last=False)
 
 
-def _search_sync(vec: list[float], kind: str | None, k: int) -> list[dict]:
+def _search_sync(vec: list[float], kind: str | None, k: int, kind_prefix: str | None = None) -> list[dict]:
     from app.knowledge.db import get_session
     from app.knowledge.vectors import get_table, search
     s = get_session()
     try:
-        return search(s, get_table(len(vec)), vec, kind=kind, k=k)
+        return search(s, get_table(len(vec)), vec, kind=kind, k=k, kind_prefix=kind_prefix)
     finally:
         s.close()
 
@@ -74,7 +74,8 @@ def retrieve(query: str, kind: str | None = None, k: int = 5) -> list[dict]:
         return []
 
 
-async def aretrieve(query: str, kind: str | None = None, k: int = 5) -> list[dict]:
+async def aretrieve(query: str, kind: str | None = None, k: int = 5,
+                    kind_prefix: str | None = None) -> list[dict]:
     """Async retrieval for request time: non-blocking embed + threaded DB search + cache."""
     if not available():
         return []
@@ -86,7 +87,7 @@ async def aretrieve(query: str, kind: str | None = None, k: int = 5) -> list[dic
         if vec is None:
             vec = await emb.aembed(query)
             _cache_put(key, vec)
-        return await asyncio.to_thread(_search_sync, vec, kind, k)
+        return await asyncio.to_thread(_search_sync, vec, kind, k, kind_prefix)
     except Exception as e:  # noqa: BLE001 — RAG is optional
         _log.warning("RAG aretrieve failed: %s", e, exc_info=True)
         return []

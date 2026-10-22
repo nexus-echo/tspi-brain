@@ -50,14 +50,19 @@ services:
 
     environment:
       DATABASE_URL: postgresql+psycopg://tspi:${TSPI_DB_PASSWORD:-tspi}@tspi-db:5432/tspi
-      KB_DOCS_DIR: /app/knowledge-sources
+      # Knowledge Q&A (POST /ask) — override any of these in Coolify; defaults shown.
+      KB_DOCS_DIR: ${KB_DOCS_DIR:-/app/knowledge-sources}
+      KB_DOCS_GLOBS: ${KB_DOCS_GLOBS:-products/*.md,39-axes/axes/*.md,new_revised_docs/question_answers.txt}
+      ASK_TOP_K: ${ASK_TOP_K:-8}
+      ASK_LLM_BUDGET_S: ${ASK_LLM_BUDGET_S:-120}
 
     # Curated knowledge docs for POST /ask (read-only). Only the allow-listed sub-folders are
-    # mounted — never patient-samples or chat exports.
+    # mounted — never patient-samples or chat exports. KB_DOCS_HOST_DIR = where the docs live on
+    # the host (default: the repo checkout); they appear in the container under KB_DOCS_DIR.
     volumes:
-      - ./knowledge-sources/products:/app/knowledge-sources/products:ro
-      - ./knowledge-sources/39-axes/axes:/app/knowledge-sources/39-axes/axes:ro
-      - ./knowledge-sources/new_revised_docs/question_answers.txt:/app/knowledge-sources/new_revised_docs/question_answers.txt:ro
+      - ${KB_DOCS_HOST_DIR:-./knowledge-sources}/products:${KB_DOCS_DIR:-/app/knowledge-sources}/products:ro
+      - ${KB_DOCS_HOST_DIR:-./knowledge-sources}/39-axes/axes:${KB_DOCS_DIR:-/app/knowledge-sources}/39-axes/axes:ro
+      - ${KB_DOCS_HOST_DIR:-./knowledge-sources}/new_revised_docs/question_answers.txt:${KB_DOCS_DIR:-/app/knowledge-sources}/new_revised_docs/question_answers.txt:ro
 
     # ports:
     #   - "8000:8000"
